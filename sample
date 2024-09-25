@@ -1,0 +1,210 @@
+import os
+import numpy as np
+import pandas as pd
+from datetime import datetime
+
+# msPortfolioBacktest would be imported from your backtesting module
+# from utils.retrobacktester.backtester import msPortfolioBacktest
+
+class DataHandler:
+    def __init__(self, data_path):
+        self.data_path = data_path
+
+    def load_factor_data(self, region_txt):
+        factor_file = f'MSCI {region_txt} factors.parquet'
+        return pd.read_parquet(os.path.join(self.data_path, factor_file))
+
+    def load_total_return_data(self):
+        totret_file = 'tret_usd.parquet'
+        return pd.read_parquet(os.path.join(self.data_path, totret_file))
+
+class FactorRankingEngine:
+    def __init__(self, factor_data, return_data):
+        self.factor_data = factor_data
+        self.return_data = return_data
+
+    def cal_factor_indx(self, filter_df, totret_df, sdate_ret, edate_ret, fac_lst, ntrl='MKT', 
+                        lagday=0, qtile=5, legs=[1, 1], rebalmth=[3, 6, 9, 12], betantrls=['N'], impute=True):
+        filter2_df = filter_df.reset_index().set_index(['DATE', 'FS_ID'])
+
+        def impute_qtile(x, qtile):
+            if qtile not in x.value_counts().index:
+                if qtile - 1 not in x.unique():
+                    x = x.replace(qtile - 2, qtile)
+                else:
+                    x = x.replace(qtile - 1, qtile)
+            if 1 not in x.value_counts().index:
+                if 2 not in x.unique():
+                    x = x.replace(3, 1)
+                else:
+                    x = x.replace(2, 1)
+            return x
+
+        indx_dct = {}
+        for fac in fac_lst:
+            indx_dct[fac] = {}
+
+            if ntrl != 'MKT':
+                filter_df = filter_df[filter_df[ntrl] > 0]
+                filter_df = filter_df.reset_index().set_index(['DATE', ntrl, 'FS_ID']).sort_index()
+                filter_df['RANKS_' + fac] = filter_df['RANKS_' + fac].round(10).groupby(['DATE', ntrl]).rank(method='min').values
+                filter_df['SCORE_' + fac] = filter_df['RANKS_' + fac].multiply(-1).add(1).groupby(['DATE', ntrl]).apply(lambda x: x.rank().div(x.count()+1)).values
+                filter_df['QTILE_' + fac] = np.floor((filter_df['RANKS_' + fac] * qtile / (filter_df.groupby(['DATE', ntrl])['SCORE_' + fac].count() + 1)) + 1)
+                filter_df = filter_df.reset_index().set_index(['DATE', 'FS_ID']).sort_index()
+
+            q_df = filter_df['QTILE_' + fac].unstack()
+            if impute:
+                q_df = q_df.apply(lambda x: impute_qtile(x, qtile), axis=1)
+            q_df = q_df.fillna(-999).astype(int)
+            q_df = q_df.loc[:, q_df.columns.isin(totret_df.index.get_level_values('FS_ID'))]
+            top_df = q_df.where(q_df == 1).notnull().div(q_df.where(q_df == 1).notnull().sum(axis=1), axis=0)
+            btm_df = q_df.where(q_df == qtile).notnull().div(q_df.where(q_df == qtile).notnull().sum(axis=1), axis=0)
+
+            for betantrl in betantrls:
+                if betantrl == 'Y':
+                    top_stack_df = top_df.replace(0, np.nan).stack().to_frame('WGT').merge(filter2_df[['BETA252']], left_index=True, right_index=True, how='left')
+                    beta_top_sr = top_stack_df['WGT'] * top_stack_df['BETA252']
+                    beta_top_sr = beta_top_sr.groupby('DATE').sum()
+
+                    btm_stack_df = btm_df.replace(0, np.nan).stack().to_frame('WGT').merge(filter2_df[['BETA252']], left_index=True, right_index=True, how='left')
+                    beta_btm_sr = btm_stack_df['WGT'] * btm_stack_df['BETA252']
+                    beta_btm_sr = beta_btm_sr.groupby('DATE').sum()
+
+                    beta_div_sr = beta_top_sr.div(beta_btm_sr)
+                    top_df = top_df.where(beta_div_sr >= 1).div(beta_div_sr, axis=0).fillna(top_df)
+                    btm_df = btm_df.where(beta_div_sr < 1).div(beta_div_sr, axis=0).fillna(btm_df)
+
+                wgt_df = top_df * legs[0] - btm_df * legs[1]
+                wgt_df.index = wgt_df.index + pd.offsets.Day(1) + pd.offsets.BMonthEnd(-1)
+                wgt_df = wgt_df[wgt_df.index.month.isin(rebalmth)]
+                wgt_df.index = wgt_df.index + pd.offsets.BDay(lagday)
+                wgt_df = wgt_df[(wgt_df.index >= sdate_ret) & (wgt_df.index <= edate_ret)]
+
+                ret_df = totret_df['TRET_USD'].unstack().T.sort_index()
+                ret_df = ret_df[wgt_df.columns]
+                ret_df = ret_df[(ret_df.index >= sdate_ret) & (ret_df.index <= edate_ret)]
+
+                index, rets, turnover, drifted_weights = msPortfolioBacktest(port_weights=wgt_df, assets_rets_l=ret_df, assets_rets_s=ret_df, trading_fee=0., long_fee=0., short_fee=0., retval=["index", "rets", "turnover", "drifted_weights"])
+
+                indx_dct[fac]['BETANTRL_' + betantrl] = index
+
+        indx2_dct = {(k1, k2): v2 for k1, v1 in indx_dct.items() for k2, v2 in v1.items()}
+        indx_df = pd.DataFrame(indx2_dct)
+        indx_df.columns.names = ['FACTOR', 'BETANTRL']
+
+        return indx_df
+
+    def cal_factor_val(self, filter_rebal_df, valqtl_lst, fac_lst, impute=True):
+        filter_rebal_df.loc[filter_rebal_df['SECTOR'].isin([40, 60]), ['FCFP', 'OACFP', 'EBITDEV', 'SP']] = np.nan
+        val_dct = {}
+        for valqtl in valqtl_lst:
+            if isinstance(valqtl, str):
+                valqtl_txt = valqtl
+                valqtl = [valqtl]
+            else:
+                valqtl_txt = '+'.join(valqtl)
+
+            val_dct[valqtl_txt] = {}
+
+            filter_rebal_adj_df = filter_rebal_df.copy(deep=True)
+            if impute and len(valqtl) > 1:
+                mktmed_df = filter_rebal_adj_df.groupby(['DATE'])[['FCFP', 'OACFP', 'EBITDEV', 'SP']].median()
+                filter_rebal_adj_df = filter_rebal_adj_df.reset_index().merge(mktmed_df, left_on='DATE', right_index=True, suffixes=('', '_MKTMED'))
+                filter_rebal_adj_df[['FCFP', 'OACFP', 'EBITDEV', 'SP']] = filter_rebal_adj_df[['FCFP', 'OACFP', 'EBITDEV', 'SP']].fillna(filter_rebal_adj_df[['FCFP_MKTMED', 'OACFP_MKTMED', 'EBITDEV_MKTMED', 'SP_MKTMED']])
+                filter_rebal_adj_df = filter_rebal_adj_df.set_index(['FS_ID', 'DATE']).sort_index()
+
+            for fac in fac_lst:
+                val_cal_dct = {}
+                for val_metric in valqtl:
+                    val_df = filter_rebal_adj_df.pivot_table(index='DATE', columns='QTILE_' + fac, values=val_metric, aggfunc='median')
+                    val_df[1] = val_df[1].fillna(val_df[2]).fillna(val_df[3])
+                    val_df[5] = val_df[5].fillna(val_df[4]).fillna(val_df[3])
+                    val_cal_dct[val_metric] = val_df[1].div(val_df[5])
+
+                val_dct[valqtl_txt][fac] = pd.DataFrame(val_cal_dct).mean(axis=1)
+
+        val2_dct = {(k1, k2): v2 for k1, v1 in val_dct.items() for k2, v2 in v1.items()}
+        val_df = pd.DataFrame(val2_dct)
+        val_df.columns.names = ['VALFAC', 'FACTOR']
+        val_df = val_df.swaplevel(axis=1)
+
+        return val_df
+
+    def rebal_factors(self, filter_df, rebalfreq):
+        fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV', 'SLREV2_IB', 'SUPDWNREV', 'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP', 'NORMEP', 'ROE', 'ROIC', 'NM', 'EBITDAM', 'LTGRO', 'NIGRO1', 'SGRO1', 'PEG', 'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT', 'DP', 'BB_YIELD2', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'FLCAPD', 'CAPD', 'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3', 'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO', 'NIGRVOL', 'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM', 'CV', 'CG', 'CM', 'CQ']
+        fac_qtl_lst = ['QTILE_' + fac for fac in fac_lst]
+
+        filter_rebal_df = filter_df.swaplevel().sort_index().reset_index()
+        if rebalfreq == 3:
+            filter_rebal_df['REBAL'] = filter_rebal_df['DATE'] + pd.offsets.BQuarterEnd(0)
+        elif rebalfreq == 1:
+            filter_rebal_df['REBAL'] = filter_rebal_df['DATE'] + pd.offsets.BMonthEnd(0)
+
+        filter_qtile_df = filter_rebal_df.drop_duplicates(subset=['REBAL', 'FS_ID'], keep='last')
+        if rebalfreq == 3:
+            filter_rebal_df['REBAL'] = filter_rebal_df['DATE'] + pd.offsets.BQuarterEnd(-1)
+        elif rebalfreq == 1:
+            filter_rebal_df['REBAL'] = filter_rebal_df['DATE'] + pd.offsets.BMonthEnd(-1)
+
+        filter_rebal_df = filter_rebal_df.drop(fac_qtl_lst, axis=1).merge(filter_qtile_df.set_index(['REBAL', 'FS_ID'])[fac_qtl_lst], left_on=['REBAL', 'FS_ID'], right_index=True, how='left', suffixes=('_x', ''))
+        filter_rebal_df = filter_rebal_df.set_index(['FS_ID', 'DATE']).sort_index()
+
+        return filter_rebal_df
+
+class OutputManager:
+    def __init__(self, output_path):
+        self.output_path = output_path
+
+    def save_to_parquet(self, data, filename):
+        filepath = os.path.join(self.output_path, filename)
+        data.to_parquet(filepath)
+
+    def save_to_csv(self, data, filename):
+        filepath = os.path.join(self.output_path, filename)
+        data.to_csv(filepath)
+
+    def save_factor_ranking(self, factor_df, region_txt):
+        self.save_to_parquet(factor_df, f'MSCI {region_txt} factors.parquet')
+
+    def save_factor_index(self, factor_index_df, filename):
+        self.save_to_csv(factor_index_df, filename)
+
+    def save_valuation_percentile(self, valpct_df, filename):
+        self.save_to_csv(valpct_df, filename)
+
+# Example of orchestrating script
+def main():
+    # Define paths
+    data_path = 'path_to_data'
+    output_path = 'path_to_output'
+
+    # Initialize managers
+    data_handler = DataHandler(data_path)
+    output_manager = OutputManager(output_path)
+
+    # Example workflow for US region
+    region_txt = 'US'
+    factor_data = data_handler.load_factor_data(region_txt)
+    totret_data = data_handler.load_total_return_data()
+
+    # Initialize FactorRankingEngine
+    ranking_engine = FactorRankingEngine(factor_data, totret_data)
+
+    # Run factor index calculation
+    fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12']
+    sdate_ret = '1989-12-29'
+    edate_ret = '2024-08-06'
+    factor_index_df = ranking_engine.cal_factor_indx(factor_data, totret_data, sdate_ret, edate_ret, fac_lst)
+
+    # Save factor index results
+    output_manager.save_factor_index(factor_index_df, 'Factor_return_US.csv')
+
+    # Example: Run factor valuation calculation
+    valqtl_lst = ['EPF', 'BP', ['BP', 'EPF']]
+    factor_val_df = ranking_engine.cal_factor_val(factor_data, valqtl_lst, fac_lst)
+
+    # Save valuation results
+    output_manager.save_valuation_percentile(factor_val_df, 'Factor_valuation_percentile.csv')
+
+if __name__ == '__main__':
+    main()
