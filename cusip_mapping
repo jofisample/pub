@@ -1,0 +1,160 @@
+import pandas as pd
+import numpy as np
+
+# ... [Factor lists and composite definitions remain the same as before] ...
+
+# Function to rank factors within each date
+def rank_factors(df, fac_lst):
+    df_ranks = df.copy()
+    for fac in fac_lst:
+        df_ranks[f'RANK_{fac}'] = df_ranks.groupby('DATE')[fac].rank(method='min', ascending=True)
+    return df_ranks
+
+# Function to adjust ranks for opposite factors
+def adjust_opposite_factors(df, opp_lst):
+    df_adjusted = df.copy()
+    for fac in opp_lst:
+        rank_col = f'RANK_{fac}'
+        if rank_col in df_adjusted.columns:
+            # Multiply by -1 and re-rank
+            df_adjusted[rank_col] = -df_adjusted[rank_col]
+            df_adjusted[rank_col] = df_adjusted.groupby('DATE')[rank_col].rank(method='min', ascending=True)
+    return df_adjusted
+
+# Function to compute percentile ranks (scores)
+def compute_percentile_scores(df, rank_cols):
+    df_scores = df.copy()
+    for rank_col in rank_cols:
+        score_col = f'SCORE_{rank_col[5:]}'  # Remove 'RANK_' prefix
+        df_scores[score_col] = df_scores.groupby('DATE')[rank_col].transform(
+            lambda x: x.rank(method='min') / (x.count() + 1)
+        )
+    return df_scores
+
+# Function to compute composite scores (CV, CM, CG)
+def compute_composite_scores(df, comp_dict):
+    df_composite = df[['DATE', 'FS_ID']].copy()
+    for comp_name, factors in comp_dict.items():
+        score_cols = [f'SCORE_{fac}' for fac in factors]
+        df_composite[comp_name] = df[score_cols].mean(axis=1)
+    return df_composite
+
+# Function to compute Composite Quality (CQ)
+def compute_cq(df, compqlty_dict):
+    df_cq = df[['DATE', 'FS_ID', 'SECTOR']].copy()
+    fin_sectors = [40, 60]
+    # Adjust ranks for opposite factors
+    for fac in compqlty_dict['CQ_OTH']:
+        rank_col = f'RANK_{fac}'
+        if fac in opp_lst:
+            df[rank_col] = -df[rank_col]
+            df[rank_col] = df.groupby('DATE')[rank_col].rank(method='min', ascending=True)
+    # Compute scores
+    for fac in compqlty_dict['CQ_OTH']:
+        score_col = f'SCORE_{fac}'
+        rank_col = f'RANK_{fac}'
+        df_cq[score_col] = df.groupby('DATE')[rank_col].transform(
+            lambda x: x.rank(method='min') / (x.count() + 1)
+        )
+    # Calculate CQ score
+    df_cq['CQ'] = np.where(
+        df_cq['SECTOR'].isin(fin_sectors),
+        df_cq[[f'SCORE_{fac}' for fac in compqlty_dict['CQ_FIN']]].mean(axis=1),
+        df_cq[[f'SCORE_{fac}' for fac in compqlty_dict['CQ_OTH']]].mean(axis=1)
+    )
+    return df_cq[['DATE', 'FS_ID', 'CQ']]
+
+# Function to compute adjusted ranks, scores, and quintiles
+def compute_adjusted_ranks_scores_quintiles(df, fac_lst, opp_lst, qtile=5):
+    df_final = df.copy()
+    for fac in fac_lst:
+        rank_col = f'RANK_{fac}'
+        adj_rank_col = f'RANKS_{fac}'
+        score_col = f'SCORE_{fac}'
+        quintile_col = f'QTILE_{fac}'
+        ascending = fac not in opp_lst
+        # Adjusted ranks
+        df_final[adj_rank_col] = df_final.groupby('DATE')[rank_col].rank(method='min', ascending=ascending)
+        # Scores
+        df_final[score_col] = df_final.groupby('DATE')[adj_rank_col].transform(
+            lambda x: (x * -1 + x.max() + 1).rank(method='min') / (x.count() + 1)
+        )
+        # Quintiles
+        df_final[quintile_col] = np.floor((df_final[adj_rank_col] * qtile) / (df_final.groupby('DATE')[adj_rank_col].transform('count') + 1)) + 1
+    return df_final
+
+# Main processing function for a region
+def process_region(factor_df, region_txt, opp_lst, fac_lst, comp_dict, compqlty_dict, qtile=5):
+    # Filter data by region
+    if region_txt == "US":
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['MSCI_COUNTRY_CODE'] == 'US')].copy()
+    elif region_txt == "EU":
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['REGION_MODEL'] == 'EUR') & (factor_df['MSCI_COUNTRY_CODE'] != 'IL')].copy()
+    elif region_txt == "JP":
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['MSCI_COUNTRY_CODE'] == 'JP')].copy()
+    else:
+        filter_df = factor_df[(factor_df['MSCI_ACW'] == 1) | (factor_df['MSCI_W'] == 1)].copy()
+    
+    # Ensure necessary columns are present
+    required_columns = ['DATE', 'FS_ID', 'SECTOR'] + fac_lst
+    filter_df = filter_df[required_columns]
+    
+    # Rank factors
+    df_ranks = rank_factors(filter_df, fac_lst)
+    
+    # Adjust ranks for opposite factors
+    df_adjusted = adjust_opposite_factors(df_ranks, opp_lst)
+    
+    # Compute percentile scores
+    rank_cols = [col for col in df_adjusted.columns if col.startswith('RANK_')]
+    df_scores = compute_percentile_scores(df_adjusted, rank_cols)
+    
+    # Compute composite scores (CV, CM, CG)
+    df_composites = compute_composite_scores(df_scores, comp_dict)
+    
+    # Compute CQ
+    df_cq = compute_cq(df_scores, compqlty_dict)
+    
+    # Merge composite scores and CQ back into the DataFrame
+    df_final = df_scores.merge(df_composites, on=['DATE', 'FS_ID'], how='left')
+    df_final = df_final.merge(df_cq, on=['DATE', 'FS_ID'], how='left')
+    
+    # Rank composite factors
+    composite_factors = list(comp_dict.keys()) + ['CQ']
+    for comp_fac in composite_factors:
+        rank_col = f'RANK_{comp_fac}'
+        adj_rank_col = f'RANKS_{comp_fac}'
+        score_col = f'SCORE_{comp_fac}'
+        quintile_col = f'QTILE_{comp_fac}'
+        ascending = True  # Assuming higher composite scores are better
+        # Rank composite scores
+        df_final[rank_col] = df_final.groupby('DATE')[comp_fac].rank(method='min', ascending=ascending)
+        # Adjusted ranks
+        df_final[adj_rank_col] = df_final[rank_col]
+        # Scores
+        df_final[score_col] = df_final.groupby('DATE')[adj_rank_col].transform(
+            lambda x: (x * -1 + x.max() + 1).rank(method='min') / (x.count() + 1)
+        )
+        # Quintiles
+        df_final[quintile_col] = np.floor((df_final[adj_rank_col] * qtile) / (df_final.groupby('DATE')[adj_rank_col].transform('count') + 1)) + 1
+    
+    # Remove factor rankings for financials and real estate sectors
+    fin_sectors = [40, 60]
+    fac_fin_lst = ['SLREV2_IB', 'SUPDWNREV', 'FCFP', 'OACFP', 'EBITDEV', 'SP', 'NM', 'EBITDAM', 'SGRO1', 'AT', 'INVS',
+                   'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'GPOA']
+    for fac in fac_fin_lst:
+        rank_col = f'RANK_{fac}'
+        if rank_col in df_final.columns:
+            df_final.loc[df_final['SECTOR'].isin(fin_sectors), rank_col] = np.nan
+    
+    # Compute adjusted ranks, scores, and quintiles for all factors including composites
+    full_factor_list = fac_lst + composite_factors
+    df_final = compute_adjusted_ranks_scores_quintiles(df_final, full_factor_list, opp_lst, qtile=qtile)
+    
+    return df_final
+
+# Process each region and save results
+for region_txt in ['US', 'EU', 'JP']:
+    df_region = process_region(factor_df, region_txt, opp_lst, fac_lst, comp_dict, compqlty_dict, qtile=5)
+    # Save to disk (optional)
+    df_region.to_parquet(f'MSCI_{region_txt}_factors.parquet', index=False)
