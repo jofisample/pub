@@ -1,40 +1,50 @@
-# Assuming 'DATE' and 'FS_ID' are columns in filter_df and opp_lst is defined
 import pandas as pd
 import numpy as np
 
+# Assuming 'DATE' and 'FS_ID' are columns in filter_df and opp_lst is defined
+
 # Remove factor rankings of these factors for Financials and Real Estate stocks
-fac_fin_lst = ['SLREV2_IB', 'SUPDWNREV', 'FCFP', 'OACFP', 'EBITDEV', 'SP', 'NM', 'EBITDAM', 'SGRO1', 'AT', 'INVS',
-               'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'GPOA']
+fac_fin_lst = ['SLREV2_IB', 'SUPDWNREV', 'FCFP', 'OACFP', 'EBITDEV', 'SP', 'NM', 'EBITDAM',
+               'SGRO1', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'GPOA']
 rnk_fin_lst = ['RANK_' + fac for fac in fac_fin_lst]
 filter_df.loc[filter_df['SECTOR'].isin([40, 60]), rnk_fin_lst] = np.nan
 
 # List of factors to process
-fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV', 'SLREV2_IB', 'SUPDWNREV',
-           'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP', 'NORMEP', 'ROE', 'ROIC', 'NM', 'EBITDAM', 'LTGRO',
-           'NIGRO1', 'SGRO1', 'PEG', 'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT', 'DP', 'BB_YIELD2', 'AT', 'INVS',
-           'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'FLCAPD', 'CAPD', 'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3',
-           'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO', 'NIGRVOL', 'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM',
-           'CV', 'CG', 'CM', 'CQ']
+fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV', 'SLREV2_IB',
+           'SUPDWNREV', 'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP', 'NORMEP', 'ROE', 'ROIC',
+           'NM', 'EBITDAM', 'LTGRO', 'NIGRO1', 'SGRO1', 'PEG', 'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT',
+           'DP', 'BB_YIELD2', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP',
+           'FLCAPD', 'CAPD', 'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3', 'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO',
+           'NIGRVOL', 'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM', 'CV', 'CG', 'CM', 'CQ']
 
 # Number of quintiles
 qtile = 5
 
+# Initialize an empty dictionary to collect new columns
+new_cols = {}
+
 for fac in fac_lst:
-    adjdir = fac in opp_lst  # True if higher values are less desirable
+    adjdir = fac in opp_lst  # Determine if higher values are less desirable
     # Determine which column to rank
     if fac in ['CV', 'CG', 'CM', 'CQ']:
         # For composite factors, rank the factor values directly
+        if fac not in filter_df.columns:
+            continue  # Skip if the factor column doesn't exist
         rank_source = filter_df[fac]
     else:
         # For other factors, rank the 'RANK_' columns
-        rank_source = filter_df['RANK_' + fac]
+        rank_col = 'RANK_' + fac
+        if rank_col not in filter_df.columns:
+            continue  # Skip if the rank column doesn't exist
+        rank_source = filter_df[rank_col]
     
     # Compute adjusted ranks ('RANKS_' columns)
-    filter_df['RANKS_' + fac] = filter_df.groupby('DATE')[rank_source.name].rank(method='min', ascending=adjdir)
+    rank_name = 'RANKS_' + fac
+    new_cols[rank_name] = rank_source.groupby(filter_df['DATE']).rank(method='min', ascending=adjdir)
     
     # Compute scores ('SCORE_' columns)
-    # Higher adjusted ranks correspond to higher scores
-    filter_df['SCORE_' + fac] = filter_df.groupby('DATE')['RANKS_' + fac].transform(
+    score_name = 'SCORE_' + fac
+    new_cols[score_name] = new_cols[rank_name].groupby(filter_df['DATE']).transform(
         lambda x: x.rank(method='min', ascending=False) / (x.count() + 1)
     )
     
@@ -46,4 +56,15 @@ for fac in fac_lst:
             # If not enough unique values, assign all to quintile 3 (middle quintile)
             return pd.Series([3] * len(x), index=x.index)
     
-    filter_df['QTILE_' + fac] = filter_df.groupby('DATE')['SCORE_' + fac].transform(assign_quintiles)
+    qtile_name = 'QTILE_' + fac
+    new_cols[qtile_name] = new_cols[score_name].groupby(filter_df['DATE']).transform(assign_quintiles)
+
+# After the loop, concatenate the new columns to filter_df
+new_cols_df = pd.DataFrame(new_cols)
+
+# It's important to ensure that the indices align
+# Let's reset the index of filter_df to ensure alignment
+filter_df = filter_df.reset_index(drop=True)
+
+# Now concatenate the new columns
+filter_df = pd.concat([filter_df, new_cols_df], axis=1)
