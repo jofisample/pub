@@ -1,55 +1,49 @@
-# Assuming opp_lst and rnk_opp_lst are already defined
-rnk_opp_lst = ['RANK_' + fac for fac in opp_lst]
+# Assuming 'DATE' and 'FS_ID' are columns in filter_df and opp_lst is defined
+import pandas as pd
+import numpy as np
 
-# Create a set for faster lookup
-rnk_opp_set = set(rnk_opp_lst)
+# Remove factor rankings of these factors for Financials and Real Estate stocks
+fac_fin_lst = ['SLREV2_IB', 'SUPDWNREV', 'FCFP', 'OACFP', 'EBITDEV', 'SP', 'NM', 'EBITDAM', 'SGRO1', 'AT', 'INVS',
+               'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'GPOA']
+rnk_fin_lst = ['RANK_' + fac for fac in fac_fin_lst]
+filter_df.loc[filter_df['SECTOR'].isin([40, 60]), rnk_fin_lst] = np.nan
 
-# Ensure 'DATE' and 'FS_ID' are present in filter_df
-if 'DATE' not in filter_df.columns or 'FS_ID' not in filter_df.columns:
-    raise ValueError("filter_df must contain 'DATE' and 'FS_ID' columns.")
+# List of factors to process
+fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV', 'SLREV2_IB', 'SUPDWNREV',
+           'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP', 'NORMEP', 'ROE', 'ROIC', 'NM', 'EBITDAM', 'LTGRO',
+           'NIGRO1', 'SGRO1', 'PEG', 'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT', 'DP', 'BB_YIELD2', 'AT', 'INVS',
+           'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'FLCAPD', 'CAPD', 'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3',
+           'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO', 'NIGRVOL', 'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM',
+           'CV', 'CG', 'CM', 'CQ']
 
-# Prepare sub_df with required columns
-cq_factors = compqlty_dct['CQ_OTH']
-rank_cols = ['RANK_' + fac for fac in cq_factors]
-required_cols = ['DATE', 'FS_ID', 'SECTOR'] + rank_cols
-sub_df = filter_df[required_cols].copy()
+# Number of quintiles
+qtile = 5
 
-# Adjust ranks for opposite factors
-for fac in cq_factors:
-    rank_col = 'RANK_' + fac
-    if rank_col in rnk_opp_set:
-        # Adjust ranks for opposite factors by multiplying by -1
-        sub_df[rank_col] = -sub_df[rank_col]
-        # Re-rank the adjusted ranks within each date
-        sub_df[rank_col] = sub_df.groupby('DATE')[rank_col].transform(lambda x: x.rank(method='min', ascending=True))
-
-# Separate financials and non-financials
-fin_sectors = [40, 60]
-# Financials
-sub_fin_df = sub_df[sub_df['SECTOR'].isin(fin_sectors)].copy()
-cq_fin_rank_cols = ['RANK_' + fac for fac in compqlty_dct['CQ_FIN']]
-# Drop rows with missing values in 'CQ_FIN' rank columns
-sub_fin_df = sub_fin_df.dropna(subset=cq_fin_rank_cols)
-# Non-financials
-sub_oth_df = sub_df[~sub_df['SECTOR'].isin(fin_sectors)].copy()
-# Drop rows with missing values in 'CQ_OTH' rank columns
-sub_oth_df = sub_oth_df.dropna(subset=rank_cols)
-
-# Combine back
-sub_df = pd.concat([sub_fin_df, sub_oth_df], axis=0)
-
-# Compute percentile ranks ('SCORE_' columns)
-for fac in cq_factors:
-    rank_col = 'RANK_' + fac
-    score_col = 'SCORE_' + fac
-    sub_df[score_col] = sub_df.groupby('DATE')[rank_col].transform(lambda x: x.rank(method='min') / (x.count() + 1))
-
-# Calculate 'CQ' score
-sub_df['CQ'] = np.where(
-    sub_df['SECTOR'].isin(fin_sectors),
-    sub_df[[f'SCORE_{fac}' for fac in compqlty_dct['CQ_FIN']]].mean(axis=1),
-    sub_df[[f'SCORE_{fac}' for fac in compqlty_dct['CQ_OTH']]].mean(axis=1)
-)
-
-# Merge 'CQ' back into filter_df
-filter_df = filter_df.merge(sub_df[['DATE', 'FS_ID', 'CQ']], on=['DATE', 'FS_ID'], how='left')
+for fac in fac_lst:
+    adjdir = fac in opp_lst  # True if higher values are less desirable
+    # Determine which column to rank
+    if fac in ['CV', 'CG', 'CM', 'CQ']:
+        # For composite factors, rank the factor values directly
+        rank_source = filter_df[fac]
+    else:
+        # For other factors, rank the 'RANK_' columns
+        rank_source = filter_df['RANK_' + fac]
+    
+    # Compute adjusted ranks ('RANKS_' columns)
+    filter_df['RANKS_' + fac] = filter_df.groupby('DATE')[rank_source.name].rank(method='min', ascending=adjdir)
+    
+    # Compute scores ('SCORE_' columns)
+    # Higher adjusted ranks correspond to higher scores
+    filter_df['SCORE_' + fac] = filter_df.groupby('DATE')['RANKS_' + fac].transform(
+        lambda x: x.rank(method='min', ascending=False) / (x.count() + 1)
+    )
+    
+    # Assign quintiles ('QTILE_' columns) using pd.qcut
+    def assign_quintiles(x):
+        try:
+            return pd.qcut(x, q=qtile, labels=False, duplicates='drop') + 1
+        except ValueError:
+            # If not enough unique values, assign all to quintile 3 (middle quintile)
+            return pd.Series([3] * len(x), index=x.index)
+    
+    filter_df['QTILE_' + fac] = filter_df.groupby('DATE')['SCORE_' + fac].transform(assign_quintiles)
