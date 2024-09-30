@@ -4,30 +4,52 @@ rnk_opp_lst = ['RANK_' + fac for fac in opp_lst]
 # Create a set for faster lookup
 rnk_opp_set = set(rnk_opp_lst)
 
-# Avoid setting MultiIndex by keeping 'DATE' and 'FS_ID' as columns
 # Ensure 'DATE' and 'FS_ID' are present in filter_df
 if 'DATE' not in filter_df.columns or 'FS_ID' not in filter_df.columns:
     raise ValueError("filter_df must contain 'DATE' and 'FS_ID' columns.")
 
-# Calculate CV, CG, CM
-for comp_name, factors in comp_dct.items():
-    # List of 'RANK_' columns for the composite factor
-    col_lst = ['RANK_' + fac for fac in factors]
-    # Ensure all required columns are present
-    required_cols = ['DATE', 'FS_ID'] + col_lst
-    sub_df = filter_df[required_cols].copy()
-    # Drop rows with missing values in any of the constituent factors
-    sub_df = sub_df.dropna(subset=col_lst)
-    # Adjust ranks and compute percentile ranks for each factor
-    for col in col_lst:
-        if col in rnk_opp_set:
-            # Adjust ranks for opposite factors by multiplying by -1
-            sub_df[col] = -sub_df[col]
-            # Re-rank the adjusted ranks within each date
-            sub_df[col] = sub_df.groupby('DATE')[col].transform(lambda x: x.rank(method='min', ascending=True))
-        # Convert ranks to percentile ranks within each date
-        sub_df[col] = sub_df.groupby('DATE')[col].transform(lambda x: x.rank(method='min') / (x.count() + 1))
-    # Calculate the composite score as the mean of percentile ranks
-    sub_df[comp_name] = sub_df[col_lst].mean(axis=1)
-    # Merge the composite score back into filter_df
-    filter_df = filter_df.merge(sub_df[['DATE', 'FS_ID', comp_name]], on=['DATE', 'FS_ID'], how='left')
+# Prepare sub_df with required columns
+cq_factors = compqlty_dct['CQ_OTH']
+rank_cols = ['RANK_' + fac for fac in cq_factors]
+required_cols = ['DATE', 'FS_ID', 'SECTOR'] + rank_cols
+sub_df = filter_df[required_cols].copy()
+
+# Adjust ranks for opposite factors
+for fac in cq_factors:
+    rank_col = 'RANK_' + fac
+    if rank_col in rnk_opp_set:
+        # Adjust ranks for opposite factors by multiplying by -1
+        sub_df[rank_col] = -sub_df[rank_col]
+        # Re-rank the adjusted ranks within each date
+        sub_df[rank_col] = sub_df.groupby('DATE')[rank_col].transform(lambda x: x.rank(method='min', ascending=True))
+
+# Separate financials and non-financials
+fin_sectors = [40, 60]
+# Financials
+sub_fin_df = sub_df[sub_df['SECTOR'].isin(fin_sectors)].copy()
+cq_fin_rank_cols = ['RANK_' + fac for fac in compqlty_dct['CQ_FIN']]
+# Drop rows with missing values in 'CQ_FIN' rank columns
+sub_fin_df = sub_fin_df.dropna(subset=cq_fin_rank_cols)
+# Non-financials
+sub_oth_df = sub_df[~sub_df['SECTOR'].isin(fin_sectors)].copy()
+# Drop rows with missing values in 'CQ_OTH' rank columns
+sub_oth_df = sub_oth_df.dropna(subset=rank_cols)
+
+# Combine back
+sub_df = pd.concat([sub_fin_df, sub_oth_df], axis=0)
+
+# Compute percentile ranks ('SCORE_' columns)
+for fac in cq_factors:
+    rank_col = 'RANK_' + fac
+    score_col = 'SCORE_' + fac
+    sub_df[score_col] = sub_df.groupby('DATE')[rank_col].transform(lambda x: x.rank(method='min') / (x.count() + 1))
+
+# Calculate 'CQ' score
+sub_df['CQ'] = np.where(
+    sub_df['SECTOR'].isin(fin_sectors),
+    sub_df[[f'SCORE_{fac}' for fac in compqlty_dct['CQ_FIN']]].mean(axis=1),
+    sub_df[[f'SCORE_{fac}' for fac in compqlty_dct['CQ_OTH']]].mean(axis=1)
+)
+
+# Merge 'CQ' back into filter_df
+filter_df = filter_df.merge(sub_df[['DATE', 'FS_ID', 'CQ']], on=['DATE', 'FS_ID'], how='left')
