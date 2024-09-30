@@ -1,70 +1,332 @@
 import pandas as pd
 import numpy as np
 
-# Assuming 'DATE' and 'FS_ID' are columns in filter_df and opp_lst is defined
+# Define your constants and lists
+qtile = 5  # Number of quantiles for quintile assignment
+region_txt = "US"  # Region code to process
 
-# Remove factor rankings of these factors for Financials and Real Estate stocks
-fac_fin_lst = ['SLREV2_IB', 'SUPDWNREV', 'FCFP', 'OACFP', 'EBITDEV', 'SP', 'NM', 'EBITDAM',
-               'SGRO1', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'GPOA']
-rnk_fin_lst = ['RANK_' + fac for fac in fac_fin_lst]
-filter_df.loc[filter_df['SECTOR'].isin([40, 60]), rnk_fin_lst] = np.nan
+# List of factors where higher values are less desirable (opposite factors)
+opp_lst = ['PEG', 'ROE_VAR', 'ER_VOL', 'CVAR', 'ASSETS_GRW1', 'ACCXASS2', 'D_EMP_SALES', 'CEMP_NUM',
+           'CAPEX_ASSETS', 'C2DEP', 'C2SALES', 'D_INVS', 'ACCRUALS_WOD', 'INVS', 'SALES_VAR', 'SALES_STABILITY',
+           'DEBTE', 'DEBT_ASSETS', 'NET_DEBT_CAP', 'TURNOVER', 'VOL', 'BETA36', 'PMOM1', 'CAPD', 'FLCAPD']
 
 # List of factors to process
 fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV', 'SLREV2_IB',
            'SUPDWNREV', 'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP', 'NORMEP', 'ROE', 'ROIC',
            'NM', 'EBITDAM', 'LTGRO', 'NIGRO1', 'SGRO1', 'PEG', 'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT',
-           'DP', 'BB_YIELD2', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP',
-           'FLCAPD', 'CAPD', 'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3', 'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO',
-           'NIGRVOL', 'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM', 'CV', 'CG', 'CM', 'CQ']
+           'DP', 'BB_YIELD2', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'FLCAPD',
+           'CAPD', 'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3', 'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO', 'NIGRVOL',
+           'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM']
 
-# Number of quintiles
-qtile = 5
+# Dictionary defining composite factors and their constituent factors
+comp_dct = {'CV': ['EPF', 'BP', 'TOT_YLD2'],
+            'CM': ['PMOM1_12', 'EMOM3'],
+            'CG': ['LTGRO', 'NIGRO1', 'IGRO']}
 
-# Initialize an empty dictionary to collect new columns
-new_cols = {}
+# Dictionary defining CQ factors for financials and others
+compqlty_dct = {'CQ_OTH': ['ROE', 'TAXPDPT', 'DEBTE', 'CEMP_NUM', 'EBITDAM'],
+                'CQ_FIN': ['ROE', 'TAXPDPT', 'DEBTE', 'CEMP_NUM']}
 
-for fac in fac_lst:
-    adjdir = fac in opp_lst  # Determine if higher values are less desirable
-    # Determine which column to rank
-    if fac in ['CV', 'CG', 'CM', 'CQ']:
-        # For composite factors, rank the factor values directly
-        if fac not in filter_df.columns:
-            continue  # Skip if the factor column doesn't exist
-        rank_source = filter_df[fac]
+# List of factors to nullify for financials and real estate sectors
+fac_fin_lst = ['SLREV2_IB', 'SUPDWNREV', 'FCFP', 'OACFP', 'EBITDEV', 'SP', 'NM', 'EBITDAM',
+               'SGRO1', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'GPOA']
+
+def compute_initial_ranks(factor_df, fac_lst):
+    """
+    Computes initial ranks for each factor within each date group.
+
+    Parameters:
+    - factor_df (pd.DataFrame): DataFrame containing the factor data.
+    - fac_lst (list): List of factors to rank.
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with new 'RANK_' columns.
+    """
+    # Create a list of 'RANK_' column names corresponding to factors
+    rnk_lst = ['RANK_' + fac for fac in fac_lst]
+    # Compute ranks within each date group for each factor
+    factor_df[rnk_lst] = factor_df.groupby('DATE')[fac_lst].rank()
+    # Return the DataFrame with new 'RANK_' columns
+    return factor_df
+
+def filter_by_region(factor_df, region_txt):
+    """
+    Filters the DataFrame based on the specified region.
+
+    Parameters:
+    - factor_df (pd.DataFrame): The DataFrame with factor data.
+    - region_txt (str): The region code ('US', 'EU', 'JP', or others).
+
+    Returns:
+    - pd.DataFrame: Filtered DataFrame 'filter_df'.
+    """
+    if region_txt == "US":
+        # Filter for US stocks in the MSCI World index
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['MSCI_COUNTRY_CODE'] == 'US')].copy()
+    elif region_txt == "EU":
+        # Filter for European stocks in the MSCI World index, excluding Israel
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['REGION_MODEL'] == 'EUR') &
+                              (factor_df['MSCI_COUNTRY_CODE'] != 'IL')].copy()
+    elif region_txt == "JP":
+        # Filter for Japanese stocks in the MSCI World index
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['MSCI_COUNTRY_CODE'] == 'JP')].copy()
     else:
-        # For other factors, rank the 'RANK_' columns
+        # Filter for all stocks in MSCI ACWI or MSCI World index
+        filter_df = factor_df[(factor_df['MSCI_ACW'] == 1) | (factor_df['MSCI_W'] == 1)].copy()
+    # Return the filtered DataFrame
+    return filter_df
+
+def calculate_composite_factors(filter_df, comp_dct, opp_lst):
+    """
+    Calculates composite factors (CV, CG, CM) by averaging percentile ranks of constituent factors.
+
+    Parameters:
+    - filter_df (pd.DataFrame): The filtered DataFrame.
+    - comp_dct (dict): Dictionary defining composite factors and their constituents.
+    - opp_lst (list): List of factors where higher values are less desirable.
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with composite factor columns.
+    """
+    # Create list of 'RANK_' columns for opposite factors
+    rnk_opp_lst = ['RANK_' + fac for fac in opp_lst]
+    # Create a set for faster lookup
+    rnk_opp_set = set(rnk_opp_lst)
+    # Loop over each composite factor
+    for comp_name, factors in comp_dct.items():
+        # List of 'RANK_' columns for the constituent factors
+        col_lst = ['RANK_' + fac for fac in factors]
+        # Ensure required columns are present
+        required_cols = ['DATE', 'FS_ID'] + col_lst
+        # Create a subset DataFrame with required columns
+        sub_df = filter_df[required_cols].copy()
+        # Drop rows with missing values in any of the constituent factors
+        sub_df = sub_df.dropna(subset=col_lst)
+        # Adjust ranks and compute percentile ranks for each factor
+        for col in col_lst:
+            if col in rnk_opp_set:
+                # Adjust ranks for opposite factors by multiplying by -1
+                sub_df[col] = -sub_df[col]
+                # Re-rank the adjusted ranks within each date
+                sub_df[col] = sub_df.groupby('DATE')[col].transform(lambda x: x.rank(method='min', ascending=True))
+            # Convert ranks to percentile ranks within each date
+            sub_df[col] = sub_df.groupby('DATE')[col].transform(lambda x: x.rank(method='min') / (x.count() + 1))
+        # Calculate the composite score as the mean of percentile ranks
+        sub_df[comp_name] = sub_df[col_lst].mean(axis=1)
+        # Merge the composite score back into filter_df
+        filter_df = filter_df.merge(sub_df[['DATE', 'FS_ID', comp_name]], on=['DATE', 'FS_ID'], how='left')
+    # Return the DataFrame with composite factors
+    return filter_df
+
+def calculate_cq(filter_df, compqlty_dct, opp_lst):
+    """
+    Computes the Composite Quality (CQ) score, handling financials and non-financials differently.
+
+    Parameters:
+    - filter_df (pd.DataFrame): The filtered DataFrame.
+    - compqlty_dct (dict): Dictionary defining CQ factors for financials and others.
+    - opp_lst (list): List of factors where higher values are less desirable.
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with the 'CQ' column.
+    """
+    # Create list of 'RANK_' columns for opposite factors
+    rnk_opp_lst = ['RANK_' + fac for fac in opp_lst]
+    # Create a set for faster lookup
+    rnk_opp_set = set(rnk_opp_lst)
+    # List of CQ factors for non-financials
+    cq_factors = compqlty_dct['CQ_OTH']
+    # List of 'RANK_' columns for CQ factors
+    rank_cols = ['RANK_' + fac for fac in cq_factors]
+    # Required columns for computation
+    required_cols = ['DATE', 'FS_ID', 'SECTOR'] + rank_cols
+    # Create a subset DataFrame with required columns
+    sub_df = filter_df[required_cols].copy()
+    # Adjust ranks for opposite factors
+    for fac in cq_factors:
         rank_col = 'RANK_' + fac
-        if rank_col not in filter_df.columns:
-            continue  # Skip if the rank column doesn't exist
-        rank_source = filter_df[rank_col]
-    
-    # Compute adjusted ranks ('RANKS_' columns)
-    rank_name = 'RANKS_' + fac
-    new_cols[rank_name] = rank_source.groupby(filter_df['DATE']).rank(method='min', ascending=adjdir)
-    
-    # Compute scores ('SCORE_' columns)
-    score_name = 'SCORE_' + fac
-    new_cols[score_name] = new_cols[rank_name].groupby(filter_df['DATE']).transform(
-        lambda x: x.rank(method='min', ascending=False) / (x.count() + 1)
+        if rank_col in rnk_opp_set:
+            # Adjust ranks for opposite factors by multiplying by -1
+            sub_df[rank_col] = -sub_df[rank_col]
+            # Re-rank the adjusted ranks within each date
+            sub_df[rank_col] = sub_df.groupby('DATE')[rank_col].transform(lambda x: x.rank(method='min', ascending=True))
+    # Define financial sectors
+    fin_sectors = [40, 60]
+    # Separate financials
+    sub_fin_df = sub_df[sub_df['SECTOR'].isin(fin_sectors)].copy()
+    # List of 'RANK_' columns for CQ financial factors
+    cq_fin_rank_cols = ['RANK_' + fac for fac in compqlty_dct['CQ_FIN']]
+    # Drop rows with missing values in CQ financial factors
+    sub_fin_df = sub_fin_df.dropna(subset=cq_fin_rank_cols)
+    # Separate non-financials
+    sub_oth_df = sub_df[~sub_df['SECTOR'].isin(fin_sectors)].copy()
+    # Drop rows with missing values in CQ other factors
+    sub_oth_df = sub_oth_df.dropna(subset=rank_cols)
+    # Combine financials and non-financials
+    sub_df = pd.concat([sub_fin_df, sub_oth_df], axis=0)
+    # Compute percentile ranks ('SCORE_' columns) for CQ factors
+    for fac in cq_factors:
+        rank_col = 'RANK_' + fac
+        score_col = 'SCORE_' + fac
+        # Compute percentile ranks within each date group
+        sub_df[score_col] = sub_df.groupby('DATE')[rank_col].transform(lambda x: x.rank(method='min') / (x.count() + 1))
+    # Calculate 'CQ' score
+    sub_df['CQ'] = np.where(
+        sub_df['SECTOR'].isin(fin_sectors),
+        # For financials, average the scores of CQ financial factors
+        sub_df[[f'SCORE_{fac}' for fac in compqlty_dct['CQ_FIN']]].mean(axis=1),
+        # For non-financials, average the scores of CQ other factors
+        sub_df[[f'SCORE_{fac}' for fac in compqlty_dct['CQ_OTH']]].mean(axis=1)
     )
-    
-    # Assign quintiles ('QTILE_' columns) using pd.qcut
-    def assign_quintiles(x):
-        try:
-            return pd.qcut(x, q=qtile, labels=False, duplicates='drop') + 1
-        except ValueError:
-            # If not enough unique values, assign all to quintile 3 (middle quintile)
-            return pd.Series([3] * len(x), index=x.index)
-    
-    qtile_name = 'QTILE_' + fac
-    new_cols[qtile_name] = new_cols[score_name].groupby(filter_df['DATE']).transform(assign_quintiles)
+    # Merge 'CQ' back into filter_df
+    filter_df = filter_df.merge(sub_df[['DATE', 'FS_ID', 'CQ']], on=['DATE', 'FS_ID'], how='left')
+    # Return the DataFrame with 'CQ' column
+    return filter_df
 
-# After the loop, concatenate the new columns to filter_df
-new_cols_df = pd.DataFrame(new_cols)
+def remove_financials_rankings(filter_df, fac_fin_lst):
+    """
+    Sets the rankings of specific factors to NaN for financial and real estate sectors.
 
-# It's important to ensure that the indices align
-# Let's reset the index of filter_df to ensure alignment
-filter_df = filter_df.reset_index(drop=True)
+    Parameters:
+    - filter_df (pd.DataFrame): The DataFrame with factor data.
+    - fac_fin_lst (list): List of factors to nullify for financials.
 
-# Now concatenate the new columns
-filter_df = pd.concat([filter_df, new_cols_df], axis=1)
+    Returns:
+    - pd.DataFrame: Modified DataFrame with rankings set to NaN for financials.
+    """
+    # Create list of 'RANK_' columns for financial factors
+    rnk_fin_lst = ['RANK_' + fac for fac in fac_fin_lst]
+    # Set the rankings to NaN for financial and real estate sectors
+    filter_df.loc[filter_df['SECTOR'].isin([40, 60]), rnk_fin_lst] = np.nan
+    # Return the modified DataFrame
+    return filter_df
+
+def calculate_adjusted_ranks_scores(filter_df, fac_lst, opp_lst):
+    """
+    Computes adjusted ranks and scores for all specified factors.
+
+    Parameters:
+    - filter_df (pd.DataFrame): The DataFrame with factor data.
+    - fac_lst (list): List of factors to process.
+    - opp_lst (list): List of opposite factors.
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with new 'RANKS_' and 'SCORE_' columns.
+    """
+    # Initialize an empty dictionary to collect new columns
+    new_cols = {}
+    # Loop over each factor
+    for fac in fac_lst:
+        # Determine if higher values are less desirable
+        adjdir = fac in opp_lst
+        # Determine which column to rank
+        if fac in ['CV', 'CG', 'CM', 'CQ']:
+            # For composite factors, rank the factor values directly
+            if fac not in filter_df.columns:
+                continue  # Skip if the factor column doesn't exist
+            rank_source = filter_df[fac]
+        else:
+            # For other factors, rank the 'RANK_' columns
+            rank_col = 'RANK_' + fac
+            if rank_col not in filter_df.columns:
+                continue  # Skip if the rank column doesn't exist
+            rank_source = filter_df[rank_col]
+        # Compute adjusted ranks ('RANKS_' columns) within each date group
+        rank_name = 'RANKS_' + fac
+        new_cols[rank_name] = rank_source.groupby(filter_df['DATE']).rank(method='min', ascending=adjdir)
+        # Compute scores ('SCORE_' columns) based on adjusted ranks
+        score_name = 'SCORE_' + fac
+        new_cols[score_name] = new_cols[rank_name].groupby(filter_df['DATE']).transform(
+            lambda x: x.rank(method='min', ascending=False) / (x.count() + 1)
+        )
+    # Create a DataFrame from the new columns
+    new_cols_df = pd.DataFrame(new_cols)
+    # Reset index to ensure alignment
+    filter_df = filter_df.reset_index(drop=True)
+    new_cols_df = new_cols_df.reset_index(drop=True)
+    # Concatenate the new columns to filter_df
+    filter_df = pd.concat([filter_df, new_cols_df], axis=1)
+    # Return the DataFrame with new 'RANKS_' and 'SCORE_' columns
+    return filter_df
+
+def calculate_quintiles(filter_df, fac_lst, qtile):
+    """
+    Assigns quintiles to the scores using pd.qcut.
+
+    Parameters:
+    - filter_df (pd.DataFrame): The DataFrame with scores.
+    - fac_lst (list): List of factors to process.
+    - qtile (int): Number of quantiles (e.g., 5 for quintiles).
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with new 'QTILE_' columns.
+    """
+    # Loop over each factor
+    for fac in fac_lst:
+        # Name of the score column
+        score_name = 'SCORE_' + fac
+        # Name of the quintile column
+        qtile_name = 'QTILE_' + fac
+        # Check if the score column exists
+        if score_name not in filter_df.columns:
+            continue
+        # Define function to assign quintiles within each date group
+        def assign_quintiles(x):
+            try:
+                # Use pd.qcut with reversed labels to assign quintiles (higher scores get higher quintiles)
+                return pd.qcut(x, q=qtile, labels=range(qtile, 0, -1), duplicates='drop')
+            except ValueError:
+                # If not enough unique values, assign all to quintile 3 (middle quintile)
+                return pd.Series([3] * len(x), index=x.index)
+        # Assign quintiles to the score column
+        filter_df[qtile_name] = filter_df.groupby('DATE')[score_name].transform(assign_quintiles)
+    # Return the DataFrame with new 'QTILE_' columns
+    return filter_df
+
+def process_factors(factor_df, region_txt, opp_lst, fac_lst, fac_fin_lst, comp_dct, compqlty_dct, qtile):
+    """
+    Orchestrates the workflow to compute ranks, scores, composites, and quintiles.
+
+    Parameters:
+    - factor_df (pd.DataFrame): The original DataFrame with factor data.
+    - region_txt (str): The region code.
+    - opp_lst (list): List of opposite factors.
+    - fac_lst (list): List of factors to process.
+    - fac_fin_lst (list): List of factors to nullify for financials.
+    - comp_dct (dict): Dictionary defining composite factors and their constituents.
+    - compqlty_dct (dict): Dictionary defining CQ factors for financials and others.
+    - qtile (int): Number of quantiles for quintile assignment.
+
+    Returns:
+    - pd.DataFrame: Final DataFrame with all computed columns.
+    """
+    # Step 1: Compute initial ranks for factors
+    factor_df = compute_initial_ranks(factor_df, fac_lst)
+    # Step 2: Filter data by region
+    filter_df = filter_by_region(factor_df, region_txt)
+    # Step 3: Calculate composite factors (CV, CG, CM)
+    filter_df = calculate_composite_factors(filter_df, comp_dct, opp_lst)
+    # Step 4: Calculate Composite Quality (CQ)
+    filter_df = calculate_cq(filter_df, compqlty_dct, opp_lst)
+    # Step 5: Remove rankings for financial and real estate stocks
+    filter_df = remove_financials_rankings(filter_df, fac_fin_lst)
+    # Step 6: Compute adjusted ranks and scores for all factors
+    fac_lst_with_composites = fac_lst + ['CV', 'CG', 'CM', 'CQ']
+    filter_df = calculate_adjusted_ranks_scores(filter_df, fac_lst_with_composites, opp_lst)
+    # Step 7: Calculate quintiles for all factors
+    filter_df = calculate_quintiles(filter_df, fac_lst_with_composites, qtile)
+    # Return the final DataFrame
+    return filter_df
+
+# Now, you can call the process_factors function
+# Ensure factor_df is defined and contains your data
+
+# Example usage:
+# Assuming factor_df is your DataFrame with all required columns
+
+# Process for multiple regions
+for region in ['US', 'EU', 'JP']:
+    # Call the processing function for each region
+    result_df = process_factors(factor_df, region, opp_lst, fac_lst, fac_fin_lst, comp_dct, compqlty_dct, qtile)
+    # Save the result to a parquet file
+    result_df.to_parquet(f'MSCI_{region}_factors.parquet', index=False)
