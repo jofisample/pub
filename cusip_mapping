@@ -2,30 +2,327 @@ import pandas as pd
 import numpy as np
 import os
 
-def read_factor_data(region_txt, ntrl, rawpath):
+from utils.retrobacktester.backtester import msPortfolioBacktest
+# from utils.retrobacktester.msReturnStats import msDailyReturnStatistics_CI
+# from utils.evergreens import printdatasample
+
+# List of factors where higher values are less desirable (opposite factors)
+opp_lst = ['PEG', 'ROE_VAR', 'ER_VOL', 'CVAR', 'ASSETS_GRW1', 'ACCXASS2', 'D_EMP_SALES', 'CEMP_NUM',
+           'CAPEX_ASSETS', 'C2DEP', 'C2SALES', 'D_INVS', 'ACCRUALS_WOD', 'INVS', 'SALES_VAR', 'SALES_STABILITY',
+           'DEBTE', 'DEBT_ASSETS', 'NET_DEBT_CAP', 'TURNOVER', 'VOL', 'BETA36', 'PMOM1', 'CAPD', 'FLCAPD']
+
+# List of composite factors
+cfac_lst = ['CV', 'CG', 'CM', 'CQ']
+
+# List of factors to process
+fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV', 'SLREV2_IB',
+           'SUPDWNREV', 'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP', 'NORMEP', 'ROE', 'ROIC',
+           'NM', 'EBITDAM', 'LTGRO', 'NIGRO1', 'SGRO1', 'PEG', 'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT',
+           'DP', 'BB_YIELD2', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'FLCAPD',
+           'CAPD', 'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3', 'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO', 'NIGRVOL',
+           'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM']
+
+# Dictionary defining composite factors and their constituent factors
+comp_dct = {
+    'CV': ['EPF', 'BP', 'TOT_YLD2'],
+    'CM': ['PMOM1_12', 'EMOM3'],
+    'CG': ['LTGRO', 'NIGRO1', 'IGRO']
+}
+
+# Dictionary defining CQ factors for financials and others
+compqlty_dct = {
+    'CQ_OTH': ['ROE', 'TAXPDPT', 'DEBTE', 'CEMP_NUM', 'EBITDAM'],
+    'CQ_FIN': ['ROE', 'TAXPDPT', 'DEBTE', 'CEMP_NUM']
+}
+
+# List of factors to nullify for financials and real estate sectors
+fac_fin_lst = ['SLREV2_IB', 'SUPDWNREV', 'FCFP', 'OACFP', 'EBITDEV', 'SP', 'NM', 'EBITDAM',
+               'SGRO1', 'AT', 'INVS', 'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'GPOA']
+
+def compute_initial_ranks(factor_df, fac_lst):
     """
-    Reads factor data for a given region and neutralization setting.
+    Computes initial ranks for each factor within each date group.
 
     Parameters:
-    - region_txt (str): Region code (e.g., 'US', 'EU', 'JP').
-    - ntrl (int): Neutralization flag (0 or 1).
-    - rawpath (str): Path to raw data files.
+    - factor_df (pd.DataFrame): DataFrame containing the factor data.
+    - fac_lst (list): List of factors to rank.
 
     Returns:
-    - pd.DataFrame: Factor DataFrame with 'DATE' and 'FS_ID' as columns.
+    - pd.DataFrame: Modified DataFrame with new 'RANK_' columns.
     """
-    # Determine the filename based on the neutralization setting
-    if ntrl == 0:
-        regionfile = f'MSCI {region_txt} factors.parquet'
+    # Create a list of 'RANK_' column names corresponding to factors
+    rnk_lst = ['RANK_' + fac for fac in fac_lst]
+    # Compute ranks within each date group for each factor
+    factor_df[rnk_lst] = factor_df.groupby('DATE')[fac_lst].rank()
+    # Return the DataFrame with new 'RANK_' columns
+    return factor_df
+
+def filter_by_region(factor_df, region_txt):
+    """
+    Filters the DataFrame based on the specified region.
+
+    Parameters:
+    - factor_df (pd.DataFrame): The DataFrame with factor data.
+    - region_txt (str): The region code ('US', 'EU', 'JP', or others).
+
+    Returns:
+    - pd.DataFrame: Filtered DataFrame 'filter_df'.
+    """
+    if region_txt == "US":
+        # Filter for US stocks in the MSCI World index
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['MSCI_COUNTRY_CODE'] == 'US')].copy()
+    elif region_txt == "EU":
+        # Filter for European stocks in the MSCI World index, excluding Israel
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['REGION_MODEL'] == 'EUR') & (factor_df['MSCI_COUNTRY_CODE'] != 'IL')].copy()
+    elif region_txt == "JP":
+        # Filter for Japanese stocks in the MSCI World index
+        filter_df = factor_df[(factor_df['MSCI_W'] == 1) & (factor_df['MSCI_COUNTRY_CODE'] == 'JP')].copy()
     else:
-        regionfile = f'MSCI {region_txt} factors - GICS1 ntrl.parquet'
+        # Filter for all stocks in MSCI ACWI or MSCI World index
+        filter_df = factor_df[(factor_df['MSCI_ACW'] == 1) | (factor_df['MSCI_W'] == 1)].copy()
+    # Return the filtered DataFrame
+    return filter_df
 
-    # Read the Parquet file into a DataFrame
-    filter_df = pd.read_parquet(os.path.join(rawpath, regionfile), engine='pyarrow')
+def calculate_composite_factors(filter_df, comp_dct, opp_lst):
+    """
+    Calculates composite factors (CV, CG, CM) by averaging percentile ranks of constituent factors.
 
-    # Reset index to ensure 'DATE' and 'FS_ID' are columns
-    filter_df.reset_index(inplace=True)
+    Parameters:
+    - filter_df (pd.DataFrame): The filtered DataFrame.
+    - comp_dct (dict): Dictionary defining composite factors and their constituents.
+    - opp_lst (list): List of factors where higher values are less desirable.
 
+    Returns:
+    - pd.DataFrame: Modified DataFrame with composite factor columns.
+    """
+    # Create list of 'RANK_' columns for opposite factors
+    rnk_opp_lst = ['RANK_' + fac for fac in opp_lst]
+    # Create a set for faster lookup
+    rnk_opp_set = set(rnk_opp_lst)
+    # Loop over each composite factor
+    for comp_name, factors in comp_dct.items():
+        # List of 'RANK_' columns for the constituent factors
+        col_lst = ['RANK_' + fac for fac in factors]
+        # Ensure required columns are present
+        required_cols = ['DATE', 'FS_ID'] + col_lst
+        # Create a subset DataFrame with required columns
+        sub_df = filter_df[required_cols].copy()
+        # Drop rows with missing values in any of the constituent factors
+        sub_df = sub_df.dropna(subset=col_lst)
+        # Adjust ranks and compute percentile ranks for each factor
+        for col in col_lst:
+            if col in rnk_opp_set:
+                # Adjust ranks for opposite factors by multiplying by -1
+                sub_df[col] = -sub_df[col]
+                # Re-rank the adjusted ranks within each date
+                sub_df[col] = sub_df.groupby('DATE')[col].transform(lambda x: x.rank(method='min', ascending=True))
+            # Convert ranks to percentile ranks within each date
+            sub_df[col] = sub_df.groupby('DATE')[col].transform(lambda x: x.rank(method='min') / (x.count() + 1))
+        # Calculate the composite score as the mean of percentile ranks
+        sub_df[comp_name] = sub_df[col_lst].mean(axis=1)
+        # Merge the composite score back into filter_df
+        filter_df = filter_df.merge(sub_df[['DATE', 'FS_ID', comp_name]], on=['DATE', 'FS_ID'], how='left')
+    # Return the DataFrame with composite factors
+    return filter_df
+
+def calculate_cq(filter_df, compqlty_dct, opp_lst):
+    """
+    Computes the Composite Quality (CQ) score, handling financials and non-financials differently.
+
+    Parameters:
+    - filter_df (pd.DataFrame): The filtered DataFrame.
+    - compqlty_dct (dict): Dictionary defining CQ factors for financials and others.
+    - opp_lst (list): List of factors where higher values are less desirable.
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with the 'CQ' column.
+    """
+    # Create list of 'RANK_' columns for opposite factors
+    rnk_opp_lst = ['RANK_' + fac for fac in opp_lst]
+    # Create a set for faster lookup
+    rnk_opp_set = set(rnk_opp_lst)
+    # List of CQ factors for non-financials
+    cq_factors = compqlty_dct['CQ_OTH']
+    # List of 'RANK_' columns for CQ factors
+    rank_cols = ['RANK_' + fac for fac in cq_factors]
+    # Required columns for computation
+    required_cols = ['DATE', 'FS_ID', 'SECTOR'] + rank_cols
+    # Create a subset DataFrame with required columns
+    sub_df = filter_df[required_cols].copy()
+    # Adjust ranks for opposite factors
+    for fac in cq_factors:
+        rank_col = 'RANK_' + fac
+        if rank_col in rnk_opp_set:
+            # Adjust ranks for opposite factors by multiplying by -1
+            sub_df[rank_col] = -sub_df[rank_col]
+            # Re-rank the adjusted ranks within each date
+            sub_df[rank_col] = sub_df.groupby('DATE')[rank_col].transform(lambda x: x.rank(method='min', ascending=True))
+    # Define financial sectors
+    fin_sectors = [40, 60]
+    # Separate financials
+    sub_fin_df = sub_df[sub_df['SECTOR'].isin(fin_sectors)].copy()
+    # List of 'RANK_' columns for CQ financial factors
+    cq_fin_rank_cols = ['RANK_' + fac for fac in compqlty_dct['CQ_FIN']]
+    # Drop rows with missing values in CQ financial factors
+    sub_fin_df = sub_fin_df.dropna(subset=cq_fin_rank_cols)
+    # Separate non-financials
+    sub_oth_df = sub_df[~sub_df['SECTOR'].isin(fin_sectors)].copy()
+    # Drop rows with missing values in CQ other factors
+    sub_oth_df = sub_oth_df.dropna(subset=rank_cols)
+    # Combine financials and non-financials
+    sub_df = pd.concat([sub_fin_df, sub_oth_df], axis=0)
+    # Compute percentile ranks ('SCORE_' columns) for CQ factors
+    for fac in cq_factors:
+        rank_col = 'RANK_' + fac
+        score_col = 'SCORE_' + fac
+        # Compute percentile ranks within each date group
+        sub_df[score_col] = sub_df.groupby('DATE')[rank_col].transform(lambda x: x.rank(method='min') / (x.count() + 1))
+    # Calculate 'CQ' score
+    sub_df['CQ'] = np.where(
+        sub_df['SECTOR'].isin(fin_sectors),
+        # For financials, average the scores of CQ financial factors
+        sub_df[[f'SCORE_{fac}' for fac in compqlty_dct['CQ_FIN']]].mean(axis=1),
+        # For non-financials, average the scores of CQ other factors
+        sub_df[[f'SCORE_{fac}' for fac in compqlty_dct['CQ_OTH']]].mean(axis=1)
+    )
+    # Merge 'CQ' back into filter_df
+    filter_df = filter_df.merge(sub_df[['DATE', 'FS_ID', 'CQ']], on=['DATE', 'FS_ID'], how='left')
+    # Return the DataFrame with 'CQ' column
+    return filter_df
+
+def remove_financials_rankings(filter_df, fac_fin_lst):
+    """
+    Sets the rankings of specific factors to NaN for financial and real estate sectors.
+
+    Parameters:
+    - filter_df (pd.DataFrame): The DataFrame with factor data.
+    - fac_fin_lst (list): List of factors to nullify for financials.
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with rankings set to NaN for financials.
+    """
+    # Create list of 'RANK_' columns for financial factors
+    rnk_fin_lst = ['RANK_' + fac for fac in fac_fin_lst]
+    # Set the rankings to NaN for financial and real estate sectors
+    filter_df.loc[filter_df['SECTOR'].isin([40, 60]), rnk_fin_lst] = np.nan
+    # Return the modified DataFrame
+    return filter_df
+
+def calculate_adjusted_ranks_scores(filter_df, fac_lst, opp_lst):
+    """
+    Computes adjusted ranks and scores for all specified factors.
+
+    Parameters:
+    - filter_df (pd.DataFrame): The DataFrame with factor data.
+    - fac_lst (list): List of factors to process.
+    - opp_lst (list): List of opposite factors.
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with new 'RANKS_' and 'SCORE_' columns.
+    """
+    # Initialize an empty dictionary to collect new columns
+    new_cols = {}
+    # Loop over each factor
+    for fac in fac_lst:
+        # Determine if higher values are less desirable
+        adjdir = fac in opp_lst
+        # Determine which column to rank
+        if fac in ['CV', 'CG', 'CM', 'CQ']:
+            # For composite factors, rank the factor values directly
+            if fac not in filter_df.columns:
+                continue  # Skip if the factor column doesn't exist
+            rank_source = filter_df[fac]
+        else:
+            # For other factors, rank the 'RANK_' columns
+            rank_col = 'RANK_' + fac
+            if rank_col not in filter_df.columns:
+                continue  # Skip if the rank column doesn't exist
+            rank_source = filter_df[rank_col]
+        # Compute adjusted ranks ('RANKS_' columns) within each date group
+        rank_name = 'RANKS_' + fac
+        new_cols[rank_name] = rank_source.groupby(filter_df['DATE']).rank(method='min', ascending=adjdir)
+        # Compute scores ('SCORE_' columns) based on adjusted ranks
+        score_name = 'SCORE_' + fac
+        new_cols[score_name] = new_cols[rank_name].groupby(filter_df['DATE']).transform(
+            lambda x: x.rank(method='min', ascending=False) / (x.count() + 1)
+        )
+    # Create a DataFrame from the new columns
+    new_cols_df = pd.DataFrame(new_cols)
+    # Reset index to ensure alignment
+    filter_df = filter_df.reset_index(drop=True)
+    new_cols_df = new_cols_df.reset_index(drop=True)
+    # Concatenate the new columns to filter_df
+    filter_df = pd.concat([filter_df, new_cols_df], axis=1)
+    # Return the DataFrame with new 'RANKS_' and 'SCORE_' columns
+    return filter_df
+
+def calculate_quintiles(filter_df, fac_lst, qtile):
+    """
+    Assigns quintiles to the scores using pd.qcut.
+
+    Parameters:
+    - filter_df (pd.DataFrame): The DataFrame with scores.
+    - fac_lst (list): List of factors to process.
+    - qtile (int): Number of quantiles (e.g., 5 for quintiles).
+
+    Returns:
+    - pd.DataFrame: Modified DataFrame with new 'QTILE_' columns.
+    """
+    # Loop over each factor
+    for fac in fac_lst:
+        # Name of the score column
+        score_name = 'SCORE_' + fac
+        # Name of the quintile column
+        qtile_name = 'QTILE_' + fac
+        # Check if the score column exists
+        if score_name not in filter_df.columns:
+            continue
+        # Define function to assign quintiles within each date group
+        def assign_quintiles(x):
+            try:
+                # Use pd.qcut with reversed labels to assign quintiles (higher scores get higher quintiles)
+                return pd.qcut(x, q=qtile, labels=range(qtile, 0, -1), duplicates='drop')
+            except ValueError:
+                # If not enough unique values, assign all to quintile 3 (middle quintile)
+                return pd.Series([3] * len(x), index=x.index)
+        # Assign quintiles to the score column
+        filter_df[qtile_name] = filter_df.groupby('DATE')[score_name].transform(assign_quintiles)
+    # Return the DataFrame with new 'QTILE_' columns
+    return filter_df
+
+def process_factors(factor_df, region_txt, opp_lst, fac_lst, fac_fin_lst, comp_dct, compqlty_dct, qtile):
+    """
+    Orchestrates the workflow to compute ranks, scores, composites, and quintiles.
+
+    Parameters:
+    - factor_df (pd.DataFrame): The original DataFrame with factor data.
+    - region_txt (str): The region code.
+    - opp_lst (list): List of opposite factors.
+    - fac_lst (list): List of factors to process.
+    - fac_fin_lst (list): List of factors to nullify for financials.
+    - comp_dct (dict): Dictionary defining composite factors and their constituents.
+    - compqlty_dct (dict): Dictionary defining CQ factors for financials and others.
+    - qtile (int): Number of quantiles for quintile assignment.
+
+    Returns:
+    - pd.DataFrame: Final DataFrame with all computed columns.
+    """
+    # Step 1: Compute initial ranks for factors
+    factor_df = compute_initial_ranks(factor_df, fac_lst)
+    # Step 2: Filter data by region
+    filter_df = filter_by_region(factor_df, region_txt)
+    # Step 3: Calculate composite factors (CV, CG, CM)
+    filter_df = calculate_composite_factors(filter_df, comp_dct, opp_lst)
+    # Step 4: Calculate Composite Quality (CQ)
+    filter_df = calculate_cq(filter_df, compqlty_dct, opp_lst)
+    # Step 5: Remove rankings for financial and real estate stocks
+    filter_df = remove_financials_rankings(filter_df, fac_fin_lst)
+    # Step 6: Compute adjusted ranks and scores for all factors
+    fac_lst_with_composites = fac_lst + ['CV', 'CG', 'CM', 'CQ']
+    filter_df = calculate_adjusted_ranks_scores(filter_df, fac_lst_with_composites, opp_lst)
+    # Step 7: Calculate quintiles for all factors
+    filter_df = calculate_quintiles(filter_df, fac_lst_with_composites, qtile)
+    # Return the final DataFrame
     return filter_df
 
 def prepare_totret_df(totret_df):
@@ -36,23 +333,18 @@ def prepare_totret_df(totret_df):
     - totret_df (pd.DataFrame): Raw total returns DataFrame.
 
     Returns:
-    - pd.DataFrame: Prepared total returns DataFrame with 'DATE' and 'FS_ID' as columns.
+    - pd.DataFrame: Prepared total returns DataFrame.
     """
-    # Copy to avoid modifying the original DataFrame
-    totret_df = totret_df.copy()
-
-    # Convert column names to uppercase for consistency
+    # Convert column names to uppercase
     totret_df.columns = totret_df.columns.str.upper()
-
-    # Convert 'EOMD' column to datetime format and rename it to 'DATE'
+    # Convert 'EOMD' to datetime and rename to 'DATE'
     totret_df['DATE'] = pd.to_datetime(totret_df['EOMD'], format='%Y%m%d')
-
+    # Select 'FS_ID', 'DATE', and 'TRET_USD' columns
+    totret_df = totret_df[['FS_ID', 'DATE', 'TRET_USD']]
     # Convert 'TRET_USD' from percentages to decimals
     totret_df['TRET_USD'] = totret_df['TRET_USD'] / 100
-
-    # Keep only relevant columns
-    totret_df = totret_df[['FS_ID', 'DATE', 'TRET_USD']]
-
+    # Pivot to have dates as index and FS_IDs as columns
+    totret_df = totret_df.pivot(index='DATE', columns='FS_ID', values='TRET_USD')
     return totret_df
 
 def prepare_isin_df(filter_df, sdate_ret, edate_ret):
@@ -94,7 +386,7 @@ def prepare_ret_fil_df(totret_df, filter_df, sdate_ret, edate_ret):
     Prepares the filtered returns DataFrame aligned with the factor data.
 
     Parameters:
-    - totret_df (pd.DataFrame): Total returns DataFrame with 'DATE' and 'FS_ID' as columns.
+    - totret_df (pd.DataFrame): Total returns DataFrame.
     - filter_df (pd.DataFrame): Factor DataFrame with 'DATE' and 'FS_ID' as columns.
     - sdate_ret (str): Start date for returns.
     - edate_ret (datetime): End date for returns.
@@ -106,15 +398,12 @@ def prepare_ret_fil_df(totret_df, filter_df, sdate_ret, edate_ret):
     fs_ids_in_filter = filter_df['FS_ID'].unique()
 
     # Filter totret_df to include only these FS_IDs
-    ret_fil_df = totret_df[totret_df['FS_ID'].isin(fs_ids_in_filter)].copy()
+    ret_fil_df = totret_df.loc[:, fs_ids_in_filter].copy()
 
     # Filter dates within the specified range, adjusting the start date to the previous month-end
-    date_filter = (ret_fil_df['DATE'] >= (pd.to_datetime(sdate_ret) + pd.offsets.BMonthEnd(-1))) & \
-                  (ret_fil_df['DATE'] <= edate_ret)
-    ret_fil_df = ret_fil_df[date_filter]
-
-    # Pivot to have dates as index and FS_IDs as columns
-    ret_fil_df = ret_fil_df.pivot(index='DATE', columns='FS_ID', values='TRET_USD')
+    date_filter = (ret_fil_df.index >= (pd.to_datetime(sdate_ret) + pd.offsets.BMonthEnd(-1))) & \
+                  (ret_fil_df.index <= edate_ret)
+    ret_fil_df = ret_fil_df.loc[date_filter]
 
     return ret_fil_df
 
@@ -142,6 +431,7 @@ def adjust_ret_fil_df(isin_df, ret_fil_df):
     # Clip extreme returns to avoid outliers (using 0.1% and 99.9% quantiles)
     lower_quantile = ret_fil_df.quantile(0.001, axis=1)
     upper_quantile = ret_fil_df.quantile(0.999, axis=1)
+
     ret_fil_df = ret_fil_df.clip(lower=lower_quantile, upper=upper_quantile, axis=0)
 
     return ret_fil_df
@@ -177,10 +467,11 @@ def impute_qtile(x, qtile):
 
 def prepare_data_for_neutralization(filter_df, fac, ntrl):
     """
-    Prepares the factor data for neutralization by recalculating ranks, scores, and quintiles.
+    Adjusts the factor data for neutralization by recalculating ranks, scores, and quintiles,
+    without using MultiIndex.
 
     Parameters:
-    - filter_df (pd.DataFrame): Factor DataFrame with 'DATE' and 'FS_ID' as columns.
+    - filter_df (pd.DataFrame): Factor DataFrame.
     - fac (str): Factor name.
     - ntrl (str): Neutralization variable ('MKT' or other).
 
@@ -189,18 +480,19 @@ def prepare_data_for_neutralization(filter_df, fac, ntrl):
     """
     if ntrl != 'MKT':
         # Filter out entries where neutralization variable is not positive
-        filter_df = filter_df[filter_df[ntrl] > 0]
+        filter_df = filter_df[filter_df[ntrl] > 0].copy()
 
         # Recompute ranks within each group defined by 'DATE' and ntrl variable
         filter_df['RANKS_' + fac] = filter_df.groupby(['DATE', ntrl])['RANKS_' + fac].rank(method='min')
 
         # Recompute scores based on the new ranks
-        filter_df['SCORE_' + fac] = filter_df.groupby(['DATE', ntrl])['RANKS_' + fac].apply(
-            lambda x: x.rank(method='min', ascending=False) / (x.count() + 1))
+        filter_df['SCORE_' + fac] = filter_df.groupby(['DATE', ntrl])['RANKS_' + fac].transform(
+            lambda x: x.rank(ascending=False) / (x.count() + 1)
+        )
 
         # Recompute quintiles based on the adjusted ranks
-        filter_df['QTILE_' + fac] = np.floor((filter_df['RANKS_' + fac] * 5 /
-                                              (filter_df.groupby(['DATE', ntrl])['SCORE_' + fac].transform('count') + 1)) + 1)
+        group_counts = filter_df.groupby(['DATE', ntrl])['SCORE_' + fac].transform('count')
+        filter_df['QTILE_' + fac] = np.floor((filter_df['RANKS_' + fac] * 5 / (group_counts + 1)) + 1)
 
     return filter_df
 
@@ -209,7 +501,7 @@ def create_quintile_dataframes(filter_df, fac, qtile, totret_df, impute):
     Creates DataFrames for the top and bottom quintiles based on factor scores.
 
     Parameters:
-    - filter_df (pd.DataFrame): Factor DataFrame with 'DATE' and 'FS_ID' as columns.
+    - filter_df (pd.DataFrame): Factor DataFrame.
     - fac (str): Factor name.
     - qtile (int): Number of quantiles.
     - totret_df (pd.DataFrame): Total returns DataFrame with dates as index and FS_IDs as columns.
@@ -219,11 +511,8 @@ def create_quintile_dataframes(filter_df, fac, qtile, totret_df, impute):
     - top_df (pd.DataFrame): Weights for the top quintile.
     - btm_df (pd.DataFrame): Weights for the bottom quintile.
     """
-    # Pivot to create a DataFrame with dates as index and FS_IDs as columns
+    # Pivot 'QTILE_' to create a DataFrame with dates as index and FS_IDs as columns
     q_df = filter_df.pivot(index='DATE', columns='FS_ID', values='QTILE_' + fac)
-
-    # Ensure that q_df is of type float64 to avoid categorical issues
-    q_df = q_df.astype('float64')
 
     # Impute missing quintiles if required
     if impute:
@@ -234,7 +523,7 @@ def create_quintile_dataframes(filter_df, fac, qtile, totret_df, impute):
 
     # Keep only FS_IDs present in totret_df
     common_fs_ids = totret_df.columns.intersection(q_df.columns)
-    q_df = q_df[common_fs_ids]
+    q_df = q_df.loc[:, common_fs_ids]
 
     # Create weight DataFrames for top and bottom quintiles
     # For top quintile (quintile 1)
@@ -262,58 +551,34 @@ def beta_neutralization(top_df, btm_df, betantrl, filter2_df):
     - btm_df (pd.DataFrame): Adjusted weights for the bottom quintile.
     """
     if betantrl == 'Y':
-        # Stack top_df and merge with 'BETA252'
-        top_stack_df = top_df.stack().reset_index()
-        top_stack_df.columns = ['DATE', 'FS_ID', 'WGT']
-        top_stack_df = top_stack_df[top_stack_df['WGT'] > 0]
-        top_stack_df = top_stack_df.merge(filter2_df[['DATE', 'FS_ID', 'BETA252']], on=['DATE', 'FS_ID'], how='left')
+        # Melt top_df to long format
+        top_long = top_df.reset_index().melt(id_vars='DATE', var_name='FS_ID', value_name='WGT')
+        top_long = top_long[top_long['WGT'] > 0]
 
-        # Calculate the weighted beta for the top portfolio
-        beta_top_sr = top_stack_df.groupby('DATE').apply(lambda x: (x['WGT'] * x['BETA252']).sum())
+        # Merge with 'BETA252'
+        top_long = top_long.merge(filter2_df[['DATE', 'FS_ID', 'BETA252']], on=['DATE', 'FS_ID'], how='left')
 
-        # Repeat the process for the bottom portfolio
-        btm_stack_df = btm_df.stack().reset_index()
-        btm_stack_df.columns = ['DATE', 'FS_ID', 'WGT']
-        btm_stack_df = btm_stack_df[btm_stack_df['WGT'] > 0]
-        btm_stack_df = btm_stack_df.merge(filter2_df[['DATE', 'FS_ID', 'BETA252']], on=['DATE', 'FS_ID'], how='left')
+        # Calculate weighted beta for top portfolio
+        beta_top = top_long.groupby('DATE').apply(lambda x: (x['WGT'] * x['BETA252']).sum())
 
-        beta_btm_sr = btm_stack_df.groupby('DATE').apply(lambda x: (x['WGT'] * x['BETA252']).sum())
+        # Repeat for bottom portfolio
+        btm_long = btm_df.reset_index().melt(id_vars='DATE', var_name='FS_ID', value_name='WGT')
+        btm_long = btm_long[btm_long['WGT'] > 0]
+        btm_long = btm_long.merge(filter2_df[['DATE', 'FS_ID', 'BETA252']], on=['DATE', 'FS_ID'], how='left')
+        beta_btm = btm_long.groupby('DATE').apply(lambda x: (x['WGT'] * x['BETA252']).sum())
 
-        # Calculate the beta ratio between top and bottom portfolios
-        beta_div_sr = beta_top_sr / beta_btm_sr
-        beta_div_sr = beta_div_sr.replace([np.inf, -np.inf], np.nan).fillna(1)
+        # Calculate beta ratio
+        beta_ratio = beta_top / beta_btm
+        beta_ratio = beta_ratio.replace([np.inf, -np.inf], np.nan).fillna(1)
 
-        # Adjust weights to achieve beta neutrality
-        for date in beta_div_sr.index:
-            if beta_div_sr.loc[date] >= 1:
-                top_df.loc[date] = top_df.loc[date] / beta_div_sr.loc[date]
+        # Adjust weights
+        for date in beta_ratio.index:
+            if beta_ratio.loc[date] >= 1:
+                top_df.loc[date] = top_df.loc[date] / beta_ratio.loc[date]
             else:
-                btm_df.loc[date] = btm_df.loc[date] * beta_div_sr.loc[date]
+                btm_df.loc[date] = btm_df.loc[date] * beta_ratio.loc[date]
 
     return top_df, btm_df
-
-def prepare_returns_dataframe(totret_df, wgt_df, sdate_ret, edate_ret):
-    """
-    Prepares the returns DataFrame aligned with the portfolio weights.
-
-    Parameters:
-    - totret_df (pd.DataFrame): Total returns DataFrame with dates as index and FS_IDs as columns.
-    - wgt_df (pd.DataFrame): Portfolio weights DataFrame.
-    - sdate_ret (str): Start date for returns.
-    - edate_ret (datetime): End date for returns.
-
-    Returns:
-    - ret_df (pd.DataFrame): Returns DataFrame aligned with portfolio weights.
-    """
-    ret_df = totret_df.copy()
-
-    # Keep only the columns (FS_IDs) present in the weights DataFrame
-    ret_df = ret_df[wgt_df.columns]
-
-    # Filter dates within the specified range
-    ret_df = ret_df[(ret_df.index >= sdate_ret) & (ret_df.index <= edate_ret)]
-
-    return ret_df
 
 def calculate_portfolio_weights(top_df, btm_df, legs, sdate_ret, edate_ret, lagday, rebalmth):
     """
@@ -348,6 +613,29 @@ def calculate_portfolio_weights(top_df, btm_df, legs, sdate_ret, edate_ret, lagd
 
     return wgt_df
 
+def prepare_returns_dataframe(totret_df, wgt_df, sdate_ret, edate_ret):
+    """
+    Prepares the returns DataFrame aligned with the portfolio weights.
+
+    Parameters:
+    - totret_df (pd.DataFrame): Total returns DataFrame with dates as index and FS_IDs as columns.
+    - wgt_df (pd.DataFrame): Portfolio weights DataFrame.
+    - sdate_ret (str): Start date for returns.
+    - edate_ret (datetime): End date for returns.
+
+    Returns:
+    - ret_df (pd.DataFrame): Returns DataFrame aligned with portfolio weights.
+    """
+    ret_df = totret_df.copy()
+
+    # Keep only the columns (FS_IDs) present in the weights DataFrame
+    ret_df = ret_df[wgt_df.columns]
+
+    # Filter dates within the specified range
+    ret_df = ret_df[(ret_df.index >= sdate_ret) & (ret_df.index <= edate_ret)]
+
+    return ret_df
+
 def backtest_portfolio(wgt_df, ret_df):
     """
     Performs the portfolio backtest using the given weights and returns.
@@ -359,11 +647,16 @@ def backtest_portfolio(wgt_df, ret_df):
     Returns:
     - index (pd.Series): Portfolio index over time.
     """
-    # Placeholder for the backtesting function
-    # You should replace this with your actual backtesting function
-    # For example, you might use cumulative returns:
-    portfolio_returns = (wgt_df * ret_df).sum(axis=1)
-    index = (1 + portfolio_returns).cumprod()
+    # Call the portfolio backtesting function (assumed to be defined elsewhere)
+    index, rets, turnover, drifted_weights = \
+        msPortfolioBacktest(port_weights=wgt_df,
+                            assets_rets_l=ret_df,
+                            assets_rets_s=ret_df,
+                            trading_fee=0.,
+                            long_fee=0.,
+                            short_fee=0.,
+                            retval=["index", "rets", "turnover", "drifted_weights"],
+                            )
 
     return index
 
@@ -373,8 +666,8 @@ def cal_factor_indx(filter_df, totret_df, sdate_ret, edate_ret, fac_lst, ntrl='M
     Calculates factor-based indices over a specified date range.
 
     Parameters:
-    - filter_df (pd.DataFrame): Factor DataFrame with 'DATE' and 'FS_ID' as columns.
-    - totret_df (pd.DataFrame): Total returns DataFrame with dates as index and FS_IDs as columns.
+    - filter_df (pd.DataFrame): Factor DataFrame.
+    - totret_df (pd.DataFrame): Total returns DataFrame.
     - sdate_ret (str): Start date for returns.
     - edate_ret (datetime): End date for returns.
     - fac_lst (list): List of factors.
@@ -389,8 +682,8 @@ def cal_factor_indx(filter_df, totret_df, sdate_ret, edate_ret, fac_lst, ntrl='M
     Returns:
     - pd.DataFrame: DataFrame containing factor indices.
     """
-    # Create a copy of filter_df for beta neutralization purposes
-    filter2_df = filter_df.copy()
+    # Ensure 'DATE', 'FS_ID', and 'BETA252' are in filter2_df
+    filter2_df = filter_df[['DATE', 'FS_ID', 'BETA252']].copy()
 
     # Dictionary to store indices for each factor
     indx_dct = {}
@@ -431,56 +724,71 @@ def cal_factor_indx(filter_df, totret_df, sdate_ret, edate_ret, fac_lst, ntrl='M
 
     return indx_df
 
-def main():
+def process_region_ntrl(filter_df, region, ntrl, totret_df, fac_lst, sdate_ret, edate_ret):
     """
-    Main function to process data for different regions and neutralization settings.
+    Processes a single region with a given neutralization setting.
+
+    Parameters:
+    - filter_df (pd.DataFrame): Factor DataFrame.
+    - region (str): Region code.
+    - ntrl (int): Neutralization flag.
+    - totret_df (pd.DataFrame): Total returns DataFrame.
+    - fac_lst (list): List of factors.
+    - sdate_ret (str): Start date for returns.
+    - edate_ret (datetime): End date for returns.
+
+    Returns:
+    - pd.DataFrame: DataFrame containing factor indices.
     """
-    # Define constants and parameters
-    fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV',
-               'SLREV2_IB', 'SUPDWNREV', 'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP',
-               'NORMEP', 'ROE', 'ROIC', 'NM', 'EBITDAM', 'LTGRO', 'NIGRO1', 'SGRO1', 'PEG',
-               'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT', 'DP', 'BB_YIELD2', 'AT', 'INVS',
-               'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'FLCAPD', 'CAPD',
-               'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3', 'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO',
-               'NIGRVOL', 'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM', 'CV', 'CG', 'CM', 'CQ']
+    # Prepare ISIN DataFrame
+    isin_df = prepare_isin_df(filter_df, sdate_ret, edate_ret)
+    # Prepare filtered returns DataFrame
+    ret_fil_df = prepare_ret_fil_df(totret_df, filter_df, sdate_ret, edate_ret)
+    # Adjust returns DataFrame to align with ISIN DataFrame
+    ret_fil_df = adjust_ret_fil_df(isin_df, ret_fil_df)
 
-    sdate_ret = '1989-12-29'
-    edate_ret = '2024-08-06'
-    edate_ret = pd.to_datetime(edate_ret)
-    rawpath = 'path_to_your_data'  # Update this with your actual data path
+    # Determine neutralization setting and compute factor indices
+    if ntrl == 0:
+        # No neutralization
+        indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, fac_lst)
+    else:
+        # Sector neutralization
+        indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, fac_lst, ntrl='SECTOR')
 
-    # Prepare total returns DataFrame
-    totret_df = pd.read_csv('totret_data.csv')  # Replace with actual data loading
-    totret_df = prepare_totret_df(totret_df)
+    return indx_df
 
-    # Pivot totret_df to have dates as index and FS_IDs as columns
-    totret_df = totret_df.pivot(index='DATE', columns='FS_ID', values='TRET_USD')
+# Orchestrate the workflow
 
-    # Loop over regions and neutralization settings
-    for region_txt in ['US', 'EU', 'JP']:
-        for ntrl in [0, 1]:
-            # Read factor data
-            filter_df = read_factor_data(region_txt, ntrl, rawpath)
+# Define paths
+rawpath = r'C:\Users\ap\py\pjs\qmneo\data\raw'
+temppath = r'C:\Users\ap\py\pjs\qmneo\data\temp'
 
-            # Prepare ISIN DataFrame
-            isin_df = prepare_isin_df(filter_df, sdate_ret, edate_ret)
+# Number of quantiles for quintile assignment
+qtile = 5
 
-            # Prepare filtered returns DataFrame
-            ret_fil_df = prepare_ret_fil_df(totret_df.reset_index(), filter_df, sdate_ret, edate_ret)
+# Load factor data
+factor_df = pd.read_parquet(os.path.join(temppath, "factor_df.parquet"))
 
-            # Adjust returns DataFrame to align with ISIN DataFrame
-            ret_fil_df = adjust_ret_fil_df(isin_df, ret_fil_df)
+# Load total returns data and prepare it
+totret_df = pd.read_parquet(os.path.join(temppath, "totret_df.parquet"))
+totret_df = prepare_totret_df(totret_df)
 
-            # Determine neutralization setting and compute factor indices
-            if ntrl == 0:
-                # No neutralization
-                indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, fac_lst)
-                indx_df.to_csv(f'Factor return - {region_txt}.csv')
+# Define region
+region = "US"
 
-                # Long-only portfolio
-                indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, fac_lst, legs=[1, 0])
-                indx_df.to_csv(f'Factor return - {region_txt} - L.csv')
-            else:
-                # Sector neutralization
-                indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, fac_lst, ntrl='SECTOR')
-                indx_df.to_csv(f'Factor return - sector ntrl - {region_txt}.csv')
+# Process factors
+filter_df = process_factors(factor_df, region, opp_lst, fac_lst, fac_fin_lst, comp_dct, compqlty_dct, qtile)
+
+# Set date range for returns
+sdate_ret = '2023-12-01'
+edate_ret = '2024-08-06'
+edate_ret = pd.to_datetime(edate_ret)
+
+# Neutralization flag
+ntrl = 0
+
+# Process region with neutralization
+rets = process_region_ntrl(filter_df, region, ntrl, totret_df, fac_lst + cfac_lst, sdate_ret, edate_ret)
+
+# Now 'rets' contains the factor indices for the specified region and neutralization setting
+# You can proceed to analyze or save 'rets' as needed
