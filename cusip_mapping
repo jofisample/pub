@@ -253,4 +253,234 @@ def beta_neutralization(top_df, btm_df, betantrl, filter2_df):
 
     Parameters:
     - top_df (pd.DataFrame): Weights for the top quintile.
-    - btm_df (pd.
+    - btm_df (pd.DataFrame): Weights for the bottom quintile.
+    - betantrl (str): Beta neutralization option ('Y' or 'N').
+    - filter2_df (pd.DataFrame): Factor DataFrame with 'DATE', 'FS_ID', 'BETA252'.
+
+    Returns:
+    - top_df (pd.DataFrame): Adjusted weights for the top quintile.
+    - btm_df (pd.DataFrame): Adjusted weights for the bottom quintile.
+    """
+    if betantrl == 'Y':
+        # Stack top_df and merge with 'BETA252'
+        top_stack_df = top_df.stack().reset_index()
+        top_stack_df.columns = ['DATE', 'FS_ID', 'WGT']
+        top_stack_df = top_stack_df[top_stack_df['WGT'] > 0]
+        top_stack_df = top_stack_df.merge(filter2_df[['DATE', 'FS_ID', 'BETA252']], on=['DATE', 'FS_ID'], how='left')
+
+        # Calculate the weighted beta for the top portfolio
+        beta_top_sr = top_stack_df.groupby('DATE').apply(lambda x: (x['WGT'] * x['BETA252']).sum())
+
+        # Repeat the process for the bottom portfolio
+        btm_stack_df = btm_df.stack().reset_index()
+        btm_stack_df.columns = ['DATE', 'FS_ID', 'WGT']
+        btm_stack_df = btm_stack_df[btm_stack_df['WGT'] > 0]
+        btm_stack_df = btm_stack_df.merge(filter2_df[['DATE', 'FS_ID', 'BETA252']], on=['DATE', 'FS_ID'], how='left')
+
+        beta_btm_sr = btm_stack_df.groupby('DATE').apply(lambda x: (x['WGT'] * x['BETA252']).sum())
+
+        # Calculate the beta ratio between top and bottom portfolios
+        beta_div_sr = beta_top_sr / beta_btm_sr
+        beta_div_sr = beta_div_sr.replace([np.inf, -np.inf], np.nan).fillna(1)
+
+        # Adjust weights to achieve beta neutrality
+        for date in beta_div_sr.index:
+            if beta_div_sr.loc[date] >= 1:
+                top_df.loc[date] = top_df.loc[date] / beta_div_sr.loc[date]
+            else:
+                btm_df.loc[date] = btm_df.loc[date] * beta_div_sr.loc[date]
+
+    return top_df, btm_df
+
+def prepare_returns_dataframe(totret_df, wgt_df, sdate_ret, edate_ret):
+    """
+    Prepares the returns DataFrame aligned with the portfolio weights.
+
+    Parameters:
+    - totret_df (pd.DataFrame): Total returns DataFrame with dates as index and FS_IDs as columns.
+    - wgt_df (pd.DataFrame): Portfolio weights DataFrame.
+    - sdate_ret (str): Start date for returns.
+    - edate_ret (datetime): End date for returns.
+
+    Returns:
+    - ret_df (pd.DataFrame): Returns DataFrame aligned with portfolio weights.
+    """
+    ret_df = totret_df.copy()
+
+    # Keep only the columns (FS_IDs) present in the weights DataFrame
+    ret_df = ret_df[wgt_df.columns]
+
+    # Filter dates within the specified range
+    ret_df = ret_df[(ret_df.index >= sdate_ret) & (ret_df.index <= edate_ret)]
+
+    return ret_df
+
+def calculate_portfolio_weights(top_df, btm_df, legs, sdate_ret, edate_ret, lagday, rebalmth):
+    """
+    Calculates the net portfolio weights by combining the top and bottom quintile weights.
+
+    Parameters:
+    - top_df (pd.DataFrame): Weights for the top quintile.
+    - btm_df (pd.DataFrame): Weights for the bottom quintile.
+    - legs (list): Weights for the long and short legs.
+    - sdate_ret (str): Start date for returns.
+    - edate_ret (datetime): End date for returns.
+    - lagday (int): Lag days for rebalancing.
+    - rebalmth (list): Months for rebalancing.
+
+    Returns:
+    - wgt_df (pd.DataFrame): Net portfolio weights.
+    """
+    # Calculate the net portfolio weights
+    wgt_df = top_df * legs[0] - btm_df * legs[1]
+
+    # Adjust dates for rebalancing: move to the first day of the next month-end
+    wgt_df.index = wgt_df.index + pd.offsets.Day(1) + pd.offsets.BMonthEnd(-1)
+
+    # Filter for rebalancing months
+    wgt_df = wgt_df[wgt_df.index.month.isin(rebalmth)]
+
+    # Apply lag days
+    wgt_df.index = wgt_df.index + pd.offsets.BDay(lagday)
+
+    # Filter dates within the specified range
+    wgt_df = wgt_df[(wgt_df.index >= sdate_ret) & (wgt_df.index <= edate_ret)]
+
+    return wgt_df
+
+def backtest_portfolio(wgt_df, ret_df):
+    """
+    Performs the portfolio backtest using the given weights and returns.
+
+    Parameters:
+    - wgt_df (pd.DataFrame): Portfolio weights DataFrame.
+    - ret_df (pd.DataFrame): Returns DataFrame.
+
+    Returns:
+    - index (pd.Series): Portfolio index over time.
+    """
+    # Placeholder for the backtesting function
+    # You should replace this with your actual backtesting function
+    # For example, you might use cumulative returns:
+    portfolio_returns = (wgt_df * ret_df).sum(axis=1)
+    index = (1 + portfolio_returns).cumprod()
+
+    return index
+
+def cal_factor_indx(filter_df, totret_df, sdate_ret, edate_ret, fac_lst, ntrl='MKT',
+                    lagday=0, qtile=5, legs=[1, 1], rebalmth=[3, 6, 9, 12], betantrls=['N'], impute=True):
+    """
+    Calculates factor-based indices over a specified date range.
+
+    Parameters:
+    - filter_df (pd.DataFrame): Factor DataFrame with 'DATE' and 'FS_ID' as columns.
+    - totret_df (pd.DataFrame): Total returns DataFrame with dates as index and FS_IDs as columns.
+    - sdate_ret (str): Start date for returns.
+    - edate_ret (datetime): End date for returns.
+    - fac_lst (list): List of factors.
+    - ntrl (str): Neutralization setting ('MKT' or other).
+    - lagday (int): Lag days for rebalancing.
+    - qtile (int): Number of quantiles.
+    - legs (list): Weights for long and short legs.
+    - rebalmth (list): Months for rebalancing.
+    - betantrls (list): Beta neutralization options.
+    - impute (bool): Whether to impute missing quintiles.
+
+    Returns:
+    - pd.DataFrame: DataFrame containing factor indices.
+    """
+    # Create a copy of filter_df for beta neutralization purposes
+    filter2_df = filter_df.copy()
+
+    # Dictionary to store indices for each factor
+    indx_dct = {}
+
+    # Loop over each factor in the list
+    for fac in fac_lst:
+        indx_dct[fac] = {}
+
+        # Prepare data for neutralization
+        filter_df_fac = prepare_data_for_neutralization(filter_df, fac, ntrl)
+
+        # Create quintile DataFrames
+        top_df, btm_df = create_quintile_dataframes(filter_df_fac, fac, qtile, totret_df, impute)
+
+        # Loop over beta neutralization options
+        for betantrl in betantrls:
+            # Perform beta neutralization if required
+            top_df_adj, btm_df_adj = beta_neutralization(top_df.copy(), btm_df.copy(), betantrl, filter2_df)
+
+            # Calculate portfolio weights
+            wgt_df = calculate_portfolio_weights(top_df_adj, btm_df_adj, legs, sdate_ret, edate_ret, lagday, rebalmth)
+
+            # Prepare returns DataFrame
+            ret_df = prepare_returns_dataframe(totret_df, wgt_df, sdate_ret, edate_ret)
+
+            # Backtest the portfolio to get the index
+            index = backtest_portfolio(wgt_df, ret_df)
+
+            # Store the index in the dictionary
+            indx_dct[fac]['BETANTRL_' + betantrl] = index
+
+    # Flatten the dictionary and create a DataFrame
+    indx2_dct = {(k1, k2): v2 for k1, v1 in indx_dct.items() for k2, v2 in v1.items()}
+    indx_df = pd.DataFrame(indx2_dct)
+
+    # Set column names for clarity
+    indx_df.columns.names = ['FACTOR', 'BETANTRL']
+
+    return indx_df
+
+def main():
+    """
+    Main function to process data for different regions and neutralization settings.
+    """
+    # Define constants and parameters
+    fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV',
+               'SLREV2_IB', 'SUPDWNREV', 'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP',
+               'NORMEP', 'ROE', 'ROIC', 'NM', 'EBITDAM', 'LTGRO', 'NIGRO1', 'SGRO1', 'PEG',
+               'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT', 'DP', 'BB_YIELD2', 'AT', 'INVS',
+               'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'FLCAPD', 'CAPD',
+               'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3', 'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO',
+               'NIGRVOL', 'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM', 'CV', 'CG', 'CM', 'CQ']
+
+    sdate_ret = '1989-12-29'
+    edate_ret = '2024-08-06'
+    edate_ret = pd.to_datetime(edate_ret)
+    rawpath = 'path_to_your_data'  # Update this with your actual data path
+
+    # Prepare total returns DataFrame
+    totret_df = pd.read_csv('totret_data.csv')  # Replace with actual data loading
+    totret_df = prepare_totret_df(totret_df)
+
+    # Pivot totret_df to have dates as index and FS_IDs as columns
+    totret_df = totret_df.pivot(index='DATE', columns='FS_ID', values='TRET_USD')
+
+    # Loop over regions and neutralization settings
+    for region_txt in ['US', 'EU', 'JP']:
+        for ntrl in [0, 1]:
+            # Read factor data
+            filter_df = read_factor_data(region_txt, ntrl, rawpath)
+
+            # Prepare ISIN DataFrame
+            isin_df = prepare_isin_df(filter_df, sdate_ret, edate_ret)
+
+            # Prepare filtered returns DataFrame
+            ret_fil_df = prepare_ret_fil_df(totret_df.reset_index(), filter_df, sdate_ret, edate_ret)
+
+            # Adjust returns DataFrame to align with ISIN DataFrame
+            ret_fil_df = adjust_ret_fil_df(isin_df, ret_fil_df)
+
+            # Determine neutralization setting and compute factor indices
+            if ntrl == 0:
+                # No neutralization
+                indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, fac_lst)
+                indx_df.to_csv(f'Factor return - {region_txt}.csv')
+
+                # Long-only portfolio
+                indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, fac_lst, legs=[1, 0])
+                indx_df.to_csv(f'Factor return - {region_txt} - L.csv')
+            else:
+                # Sector neutralization
+                indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, fac_lst, ntrl='SECTOR')
+                indx_df.to_csv(f'Factor return - sector ntrl - {region_txt}.csv')
