@@ -1,151 +1,64 @@
-def rebal_factors(filter_df, rebalfreq, fac_lst):
+def calculate_efficacy(filter_df, totret_df, sdate_ret, edate_ret, factors):
     """
-    Adjusts the factor DataFrame for rebalancing frequencies and merges quintile information.
+    Calculates efficacy using the provided filter_df and totret_df over the specified date range.
 
     Parameters:
-    - filter_df (pd.DataFrame): The DataFrame with factor data.
-    - rebalfreq (int): Rebalancing frequency (1 for monthly, 3 for quarterly).
-    - fac_lst (list): List of factors to process.
+    - filter_df (pd.DataFrame): The factor DataFrame with 'DATE', 'FS_ID', etc.
+    - totret_df (pd.DataFrame): The total returns DataFrame with dates as index and FS_IDs as columns.
+    - sdate_ret (str): Start date for returns.
+    - edate_ret (str or datetime): End date for returns.
+    - factors (list): List of factors to process.
 
     Returns:
-    - pd.DataFrame: DataFrame adjusted for rebalancing with updated quintile information.
+    - indx_df: DataFrame of factor indices using daily returns.
+    - indxM_df: DataFrame of factor indices using monthly returns.
     """
-    fac_qtl_lst = ['QTILE_' + fac for fac in fac_lst]
 
-    filter_rebal_df = filter_df.copy()
+    edate_ret = pd.to_datetime(edate_ret)
 
-    # Compute 'REBAL' dates based on rebalancing frequency
-    if rebalfreq == 3:
-        filter_rebal_df['REBAL'] = filter_rebal_df['DATE'] + pd.offsets.BQuarterEnd(0)
-    elif rebalfreq == 1:
-        filter_rebal_df['REBAL'] = filter_rebal_df['DATE'] + pd.offsets.BMonthEnd(0)
-    else:
-        raise ValueError("Invalid rebalancing frequency. Use 1 for monthly or 3 for quarterly.")
+    # Prepare ISIN DataFrame
+    isin_df = prepare_isin_df(filter_df, sdate_ret, edate_ret)
 
-    # Drop duplicates to keep the last quintile information for each 'REBAL' and 'FS_ID'
-    filter_qtile_df = filter_rebal_df.drop_duplicates(subset=['REBAL', 'FS_ID'], keep='last')
+    # Prepare filtered returns DataFrame
+    ret_fil_df = prepare_ret_fil_df(totret_df, filter_df, sdate_ret, edate_ret)
 
-    # Recompute 'REBAL' date with different offset
-    if rebalfreq == 3:
-        filter_rebal_df['REBAL'] = filter_rebal_df['DATE'] + pd.offsets.BQuarterEnd(-1)
-    elif rebalfreq == 1:
-        filter_rebal_df['REBAL'] = filter_rebal_df['DATE'] + pd.offsets.BMonthEnd(-1)
+    # Adjust returns DataFrame to align with ISIN DataFrame and clip extreme values
+    ret_fil_df = adjust_ret_fil_df(isin_df, ret_fil_df)
 
-    # Prepare DataFrame for merging
-    filter_qtile_df_sub = filter_qtile_df[['REBAL', 'FS_ID'] + fac_qtl_lst]
+    # Calculate cumulative returns for daily returns
+    cum_returns = ret_fil_df.add(1).cumprod(axis=0)
 
-    # Merge quintile information back into the main DataFrame
-    filter_rebal_df = filter_rebal_df.drop(columns=fac_qtl_lst).merge(
-        filter_qtile_df_sub, on=['REBAL', 'FS_ID'], how='left', suffixes=('_x', '')
-    )
+    # Resample cumulative returns to business month-end frequency for monthly returns
+    cum_returns_monthly = cum_returns.resample('BM').last()
 
-    # Sort by 'FS_ID' and 'DATE' for consistency
-    filter_rebal_df = filter_rebal_df.sort_values(by=['FS_ID', 'DATE'])
+    # Calculate monthly returns
+    retM_fil_df = cum_returns_monthly.pct_change().fillna(0)
 
-    return filter_rebal_df
+    # Adjust date ranges if necessary
+    sdate_ret = pd.to_datetime(sdate_ret)
+    edate_ret = pd.to_datetime(edate_ret)
 
+    # Ensure returns DataFrames are within the specified date range
+    ret_fil_df = ret_fil_df[(ret_fil_df.index >= sdate_ret) & (ret_fil_df.index <= edate_ret)]
+    retM_fil_df = retM_fil_df[(retM_fil_df.index >= sdate_ret) & (retM_fil_df.index <= edate_ret)]
 
-def cal_factor_val(filter_rebal_df, valqtl_lst, fac_lst, impute=True):
-    """
-    Calculates valuation levels for specified factors and valuation metrics.
+    # Calculate factor indices using daily returns
+    indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, factors)
 
-    Parameters:
-    - filter_rebal_df (pd.DataFrame): The rebalanced factor DataFrame.
-    - valqtl_lst (list): List of valuation metrics or combinations thereof.
-    - fac_lst (list): List of factors to process.
-    - impute (bool): Whether to impute missing values for blended valuations.
+    # Calculate factor indices using monthly returns
+    # Adjust rebalancing months to include all months for monthly data
+    indxM_df = cal_factor_indx(filter_df, retM_fil_df, sdate_ret, edate_ret, factors, rebalmth=list(range(1, 13)))
 
-    Returns:
-    - pd.DataFrame: DataFrame containing valuation levels for each factor and valuation metric.
-    """
-    # Set specified columns to NaN for financial and real estate sectors
-    cols_to_nan = ['FCFP', 'OACFP', 'EBITDEV', 'SP']
-    filter_rebal_df.loc[filter_rebal_df['SECTOR'].isin([40, 60]), cols_to_nan] = np.nan
-
-    val_dct = {}
-
-    for valqtl in valqtl_lst:
-        # Handle single and multiple valuation metrics
-        if isinstance(valqtl, str):
-            valqtl_txt = valqtl
-            valqtl = [valqtl]
-        else:
-            valqtl_txt = '+'.join(valqtl)
-        val_dct[valqtl_txt] = {}
-
-        filter_rebal_adj_df = filter_rebal_df.copy()
-
-        # Impute missing values for blended valuations
-        if impute and len(valqtl) > 1:
-            # Calculate median values per date
-            mktmed_df = filter_rebal_adj_df.groupby('DATE')[cols_to_nan].median().reset_index()
-            # Merge median values back into the DataFrame
-            filter_rebal_adj_df = filter_rebal_adj_df.merge(mktmed_df, on='DATE', suffixes=('', '_MKTMED'))
-            # Fill NaNs with median values
-            for col in cols_to_nan:
-                filter_rebal_adj_df[col] = filter_rebal_adj_df[col].fillna(filter_rebal_adj_df[col + '_MKTMED'])
-            # Drop the median columns
-            filter_rebal_adj_df.drop(columns=[col + '_MKTMED' for col in cols_to_nan], inplace=True)
-
-        for fac in fac_lst:
-            val_cal_dct = {}
-            qt_col = 'QTILE_' + fac
-            # Ensure quintile columns are of integer type
-            filter_rebal_adj_df[qt_col] = filter_rebal_adj_df[qt_col].astype(int)
-            for val_metric in valqtl:
-                # Create a pivot table with median values per quintile and date
-                val_df = filter_rebal_adj_df.pivot_table(
-                    index='DATE', columns=qt_col, values=val_metric, aggfunc='median'
-                )
-                # Ensure quintile columns 1 and 5 exist
-                if 1 not in val_df.columns:
-                    val_df[1] = np.nan
-                if 5 not in val_df.columns:
-                    val_df[5] = np.nan
-                # Replace missing top quintile values with lower quintiles
-                val_df[1] = val_df[1].fillna(val_df.get(2)).fillna(val_df.get(3))
-                # Replace missing bottom quintile values with higher quintiles
-                val_df[5] = val_df[5].fillna(val_df.get(4)).fillna(val_df.get(3))
-                # Calculate the valuation ratio
-                val_cal_dct[val_metric] = val_df[1].div(val_df[5])
-            # Compute mean across valuation metrics
-            val_dct[valqtl_txt][fac] = pd.DataFrame(val_cal_dct).mean(axis=1)
-
-    # Convert the valuation dictionary to a DataFrame
-    val2_dct = {(k1, k2): v2 for k1, v1 in val_dct.items() for k2, v2 in v1.items()}
-    val_df = pd.DataFrame(val2_dct)
-    val_df.columns.names = ['VALFAC', 'FACTOR']
-    val_df = val_df.swaplevel(axis=1)
-
-    return val_df
+    return indx_df, indxM_df
 
 
-# Main execution
-# Define the list of factors
-fac_lst = ['PMOM1', 'PMOM3', 'PMOM9', 'PMOM12', 'PMOM1_9', 'PMOM1_12', 'NREV2', 'UPDWNREV',
-           'SLREV2_IB', 'SUPDWNREV', 'EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP',
-           'NORMEP', 'ROE', 'ROIC', 'NM', 'EBITDAM', 'LTGRO', 'NIGRO1', 'SGRO1', 'PEG',
-           'STGRO_IB', 'DEBTE', 'YLDASS', 'PAYOUT', 'DP', 'BB_YIELD2', 'AT', 'INVS',
-           'ACCXASS1', 'ACCXASS2', 'C2SALES', 'C2DEP', 'RDCAP', 'FLCAPD', 'CAPD',
-           'TOT_YLD2', 'TAXPDPT', 'UPDWNREV3', 'SUPDWNREV3', 'VOL', 'EMOM3', 'IGRO',
-           'NIGRVOL', 'GPOA', 'AG', 'RESMOM1_12', 'ROA', 'CEMP_NUM', 'CV', 'CG', 'CM', 'CQ']
+# Example usage
+# Define parameters
+region_txt = 'US'
+sdate_ret = '1989-12-29'
+edate_ret = '2024-07-22'
+edate_ret = pd.to_datetime(edate_ret)
+factors = ['CV', 'CG', 'CM', 'CQ']
 
-# Define the region
-region_txt = "US"
-
-# Rebalance factors
-filter_rebal_df = rebal_factors(filter_df, rebalfreq=3, fac_lst=fac_lst)
-
-# Filter dates starting from '1989-12-01'
-filter_rebal_df = filter_rebal_df[filter_rebal_df['DATE'] >= '1989-12-01']
-
-# Define valuation metrics
-valqtl_lst = ['EPF', 'FCFP', 'OACFP', 'EBITDEV', 'BP', 'SP', 'EP', 'NORMEP', 'DP',
-              'TOT_YLD2', ['BP', 'EPF']]
-
-# Calculate valuation levels
-val_cal_df = cal_factor_val(filter_rebal_df, valqtl_lst, fac_lst, impute=True)
-
-# Rank valuations and store in a dictionary
-valpct_dct = {}
-valpct_dct[region_txt] = val_cal_df.rank(pct=True, axis=0)
+# Call the function
+indx_df, indxM_df = calculate_efficacy(filter_df, totret_df, sdate_ret, edate_ret, factors)
