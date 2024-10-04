@@ -1,64 +1,114 @@
-def calculate_efficacy(filter_df, totret_df, sdate_ret, edate_ret, factors):
+def calculate_additional_factors(factor_df, totret_df):
     """
-    Calculates efficacy using the provided filter_df and totret_df over the specified date range.
-
+    Calculates additional factors and updates factor_df accordingly.
+    
     Parameters:
-    - filter_df (pd.DataFrame): The factor DataFrame with 'DATE', 'FS_ID', etc.
-    - totret_df (pd.DataFrame): The total returns DataFrame with dates as index and FS_IDs as columns.
-    - sdate_ret (str): Start date for returns.
-    - edate_ret (str or datetime): End date for returns.
-    - factors (list): List of factors to process.
-
+    - factor_df (pd.DataFrame): The factor DataFrame to be updated.
+    - totret_df (pd.DataFrame): Total returns DataFrame used to calculate volatility.
+    
     Returns:
-    - indx_df: DataFrame of factor indices using daily returns.
-    - indxM_df: DataFrame of factor indices using monthly returns.
+    - pd.DataFrame: Updated factor_df with new calculated factors.
     """
+    # Ensure factor_df is sorted
+    factor_df = factor_df.sort_values(['TSID', 'EOM'])
+    
+    # Combine EST_IB and EST_FE into EST
+    factor_df['EST'] = np.where(
+        factor_df['EST_IB'].isnull(),
+        factor_df['EST_FE'],
+        factor_df['EST_IB']
+    )
+    
+    # Calculate 3-period rolling mean of EST
+    factor_df['EST3'] = factor_df.groupby('TSID')['EST'].rolling(window=3, min_periods=3).mean().reset_index(level=0, drop=True)
+    
+    # Shift EST3 by 3 periods to create EST3_LAG
+    factor_df['EST3_LAG'] = factor_df.groupby('TSID')['EST3'].shift(3)
+    
+    # Calculate percentage change in EST3 over 3 periods
+    factor_df['EMOM3'] = factor_df.groupby('TSID')['EST3'].pct_change(periods=3, fill_method=None) * 100
+    
+    # Apply conditions to set EMOM3 to 0 where necessary
+    factor_df['EMOM3'] = np.where(
+        (factor_df['EST3'] < 0) | (factor_df['EST3_LAG'] < 0) |
+        (factor_df['EST3'].isna()) | (factor_df['EST3_LAG'].isna()),
+        0,
+        factor_df['EMOM3']
+    )
+    
+    # Calculate 3-period rolling mean of UPDWNREV and SUPDWNREV
+    factor_df['UPDWNREV3'] = factor_df.groupby('TSID')['UPDWNREV'].rolling(window=3, min_periods=3).mean().reset_index(level=0, drop=True)
+    factor_df['SUPDWNREV3'] = factor_df.groupby('TSID')['SUPDWNREV'].rolling(window=3, min_periods=3).mean().reset_index(level=0, drop=True)
+    
+    # Calculate IGRO
+    factor_df['IGRO'] = factor_df['ROE'] * (1 - factor_df['PAYOUT'])
+    
+    # Calculate volatility (VOL) using totret_df
+    # Ensure totret_df has 'FS_ID', 'DATE', and 'TRET_USD' columns
+    required_cols = ['FS_ID', 'DATE', 'TRET_USD']
+    missing_cols = [col for col in required_cols if col not in totret_df.columns]
+    if missing_cols:
+        raise ValueError(f"totret_df is missing required columns: {missing_cols}")
+    
+    # Calculate rolling standard deviation over 126 days with minimum 63 days
+    # Multiply by sqrt(252) to annualize
+    totret_df_sorted = totret_df.sort_values(['FS_ID', 'DATE'])
+    totret_df_grouped = totret_df_sorted.groupby('FS_ID')
+    std_df = totret_df_grouped.apply(
+        lambda x: x.set_index('DATE')['TRET_USD'].rolling(window=126, min_periods=63).std()
+    ).multiply(np.sqrt(252)).reset_index()
+    
+    # Rename the standard deviation column to 'VOL'
+    std_df.rename(columns={'TRET_USD': 'VOL'}, inplace=True)
+    
+    # Merge VOL back into factor_df
+    factor_df = factor_df.merge(
+        std_df[['FS_ID', 'DATE', 'VOL']],
+        on=['FS_ID', 'DATE'],
+        how='left'
+    )
+    
+    # Calculate NIGRVOL as 60-month rolling standard deviation of NIGRO1
+    factor_df['NIGRVOL'] = factor_df.groupby('TSID')['NIGRO1'].rolling(window=60, min_periods=60).std().reset_index(level=0, drop=True)
+    
+    # Calculate GPOA
+    factor_df['GPOA'] = np.where(
+        (factor_df['ASSETS'] > 0) & (factor_df['SALES'] > 0) & (factor_df['COGS_XDEP'].notnull()),
+        (factor_df['SALES'] - factor_df['COGS_XDEP'] - factor_df['DEP_AMORT_EXP']) / factor_df['ASSETS'],
+        np.NaN
+    )
+    
+    # Calculate ROA
+    factor_df['ROA'] = np.where(
+        factor_df['ASSETS'] > 0,
+        factor_df['NET_INC'] / factor_df['ASSETS'],
+        np.NaN
+    )
+    
+    # Calculate CFOA
+    factor_df['CFOA'] = np.where(
+        factor_df['ASSETS'] > 0,
+        factor_df['OPER_CF'] / factor_df['ASSETS'],
+        np.NaN
+    )
+    
+    # Calculate ROCE
+    factor_df['ROCE'] = np.where(
+        (factor_df['ASSETS'] > 0) & (factor_df['LIABS_CURR'].notnull()) & ((factor_df['ASSETS'] - factor_df['LIABS_CURR']) > 0),
+        factor_df['EBIT_OPER'] / (factor_df['ASSETS'] - factor_df['LIABS_CURR']),
+        np.NaN
+    )
+    
+    # Calculate Asset Growth (AG)
+    factor_df['AG'] = factor_df.groupby('TSID')['ASSETS'].pct_change(periods=12, fill_method=None) * 100
+    
+    # Clean EMP_NUM and calculate CEMP_NUM
+    factor_df['EMP_NUM'] = np.where(factor_df['EMP_NUM'] > 0, factor_df['EMP_NUM'], np.NaN)
+    factor_df['CEMP_NUM'] = factor_df.groupby('TSID')['EMP_NUM'].pct_change(periods=12, fill_method=None) * 100
+    
+    return factor_df
 
-    edate_ret = pd.to_datetime(edate_ret)
-
-    # Prepare ISIN DataFrame
-    isin_df = prepare_isin_df(filter_df, sdate_ret, edate_ret)
-
-    # Prepare filtered returns DataFrame
-    ret_fil_df = prepare_ret_fil_df(totret_df, filter_df, sdate_ret, edate_ret)
-
-    # Adjust returns DataFrame to align with ISIN DataFrame and clip extreme values
-    ret_fil_df = adjust_ret_fil_df(isin_df, ret_fil_df)
-
-    # Calculate cumulative returns for daily returns
-    cum_returns = ret_fil_df.add(1).cumprod(axis=0)
-
-    # Resample cumulative returns to business month-end frequency for monthly returns
-    cum_returns_monthly = cum_returns.resample('BM').last()
-
-    # Calculate monthly returns
-    retM_fil_df = cum_returns_monthly.pct_change().fillna(0)
-
-    # Adjust date ranges if necessary
-    sdate_ret = pd.to_datetime(sdate_ret)
-    edate_ret = pd.to_datetime(edate_ret)
-
-    # Ensure returns DataFrames are within the specified date range
-    ret_fil_df = ret_fil_df[(ret_fil_df.index >= sdate_ret) & (ret_fil_df.index <= edate_ret)]
-    retM_fil_df = retM_fil_df[(retM_fil_df.index >= sdate_ret) & (retM_fil_df.index <= edate_ret)]
-
-    # Calculate factor indices using daily returns
-    indx_df = cal_factor_indx(filter_df, ret_fil_df, sdate_ret, edate_ret, factors)
-
-    # Calculate factor indices using monthly returns
-    # Adjust rebalancing months to include all months for monthly data
-    indxM_df = cal_factor_indx(filter_df, retM_fil_df, sdate_ret, edate_ret, factors, rebalmth=list(range(1, 13)))
-
-    return indx_df, indxM_df
 
 
-# Example usage
-# Define parameters
-region_txt = 'US'
-sdate_ret = '1989-12-29'
-edate_ret = '2024-07-22'
-edate_ret = pd.to_datetime(edate_ret)
-factors = ['CV', 'CG', 'CM', 'CQ']
 
-# Call the function
-indx_df, indxM_df = calculate_efficacy(filter_df, totret_df, sdate_ret, edate_ret, factors)
+
