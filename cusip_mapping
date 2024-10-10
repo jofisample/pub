@@ -1,114 +1,57 @@
-def calculate_additional_factors(factor_df, totret_df):
-    """
-    Calculates additional factors and updates factor_df accordingly.
-    
-    Parameters:
-    - factor_df (pd.DataFrame): The factor DataFrame to be updated.
-    - totret_df (pd.DataFrame): Total returns DataFrame used to calculate volatility.
-    
-    Returns:
-    - pd.DataFrame: Updated factor_df with new calculated factors.
-    """
-    # Ensure factor_df is sorted
-    factor_df = factor_df.sort_values(['TSID', 'EOM'])
-    
-    # Combine EST_IB and EST_FE into EST
-    factor_df['EST'] = np.where(
-        factor_df['EST_IB'].isnull(),
-        factor_df['EST_FE'],
-        factor_df['EST_IB']
-    )
-    
-    # Calculate 3-period rolling mean of EST
-    factor_df['EST3'] = factor_df.groupby('TSID')['EST'].rolling(window=3, min_periods=3).mean().reset_index(level=0, drop=True)
-    
-    # Shift EST3 by 3 periods to create EST3_LAG
-    factor_df['EST3_LAG'] = factor_df.groupby('TSID')['EST3'].shift(3)
-    
-    # Calculate percentage change in EST3 over 3 periods
-    factor_df['EMOM3'] = factor_df.groupby('TSID')['EST3'].pct_change(periods=3, fill_method=None) * 100
-    
-    # Apply conditions to set EMOM3 to 0 where necessary
-    factor_df['EMOM3'] = np.where(
-        (factor_df['EST3'] < 0) | (factor_df['EST3_LAG'] < 0) |
-        (factor_df['EST3'].isna()) | (factor_df['EST3_LAG'].isna()),
-        0,
-        factor_df['EMOM3']
-    )
-    
-    # Calculate 3-period rolling mean of UPDWNREV and SUPDWNREV
-    factor_df['UPDWNREV3'] = factor_df.groupby('TSID')['UPDWNREV'].rolling(window=3, min_periods=3).mean().reset_index(level=0, drop=True)
-    factor_df['SUPDWNREV3'] = factor_df.groupby('TSID')['SUPDWNREV'].rolling(window=3, min_periods=3).mean().reset_index(level=0, drop=True)
-    
-    # Calculate IGRO
-    factor_df['IGRO'] = factor_df['ROE'] * (1 - factor_df['PAYOUT'])
-    
-    # Calculate volatility (VOL) using totret_df
-    # Ensure totret_df has 'FS_ID', 'DATE', and 'TRET_USD' columns
-    required_cols = ['FS_ID', 'DATE', 'TRET_USD']
-    missing_cols = [col for col in required_cols if col not in totret_df.columns]
-    if missing_cols:
-        raise ValueError(f"totret_df is missing required columns: {missing_cols}")
-    
-    # Calculate rolling standard deviation over 126 days with minimum 63 days
-    # Multiply by sqrt(252) to annualize
-    totret_df_sorted = totret_df.sort_values(['FS_ID', 'DATE'])
-    totret_df_grouped = totret_df_sorted.groupby('FS_ID')
-    std_df = totret_df_grouped.apply(
-        lambda x: x.set_index('DATE')['TRET_USD'].rolling(window=126, min_periods=63).std()
-    ).multiply(np.sqrt(252)).reset_index()
-    
-    # Rename the standard deviation column to 'VOL'
-    std_df.rename(columns={'TRET_USD': 'VOL'}, inplace=True)
-    
-    # Merge VOL back into factor_df
-    factor_df = factor_df.merge(
-        std_df[['FS_ID', 'DATE', 'VOL']],
-        on=['FS_ID', 'DATE'],
-        how='left'
-    )
-    
-    # Calculate NIGRVOL as 60-month rolling standard deviation of NIGRO1
-    factor_df['NIGRVOL'] = factor_df.groupby('TSID')['NIGRO1'].rolling(window=60, min_periods=60).std().reset_index(level=0, drop=True)
-    
-    # Calculate GPOA
-    factor_df['GPOA'] = np.where(
-        (factor_df['ASSETS'] > 0) & (factor_df['SALES'] > 0) & (factor_df['COGS_XDEP'].notnull()),
-        (factor_df['SALES'] - factor_df['COGS_XDEP'] - factor_df['DEP_AMORT_EXP']) / factor_df['ASSETS'],
-        np.NaN
-    )
-    
-    # Calculate ROA
-    factor_df['ROA'] = np.where(
-        factor_df['ASSETS'] > 0,
-        factor_df['NET_INC'] / factor_df['ASSETS'],
-        np.NaN
-    )
-    
-    # Calculate CFOA
-    factor_df['CFOA'] = np.where(
-        factor_df['ASSETS'] > 0,
-        factor_df['OPER_CF'] / factor_df['ASSETS'],
-        np.NaN
-    )
-    
-    # Calculate ROCE
-    factor_df['ROCE'] = np.where(
-        (factor_df['ASSETS'] > 0) & (factor_df['LIABS_CURR'].notnull()) & ((factor_df['ASSETS'] - factor_df['LIABS_CURR']) > 0),
-        factor_df['EBIT_OPER'] / (factor_df['ASSETS'] - factor_df['LIABS_CURR']),
-        np.NaN
-    )
-    
-    # Calculate Asset Growth (AG)
-    factor_df['AG'] = factor_df.groupby('TSID')['ASSETS'].pct_change(periods=12, fill_method=None) * 100
-    
-    # Clean EMP_NUM and calculate CEMP_NUM
-    factor_df['EMP_NUM'] = np.where(factor_df['EMP_NUM'] > 0, factor_df['EMP_NUM'], np.NaN)
-    factor_df['CEMP_NUM'] = factor_df.groupby('TSID')['EMP_NUM'].pct_change(periods=12, fill_method=None) * 100
-    
-    return factor_df
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+# Generate example data with descriptive column names
+dates = pd.date_range('2023-01-01', periods=100)
+df = pd.DataFrame(np.random.randn(100, 5), index=dates, columns=['Comp Growth', 'Price Momentum', 'Growth Factor', 'Value', 'Quality'])
 
+# Create figure with one main plot
+fig, ax1 = plt.subplots(figsize=(10, 5))
 
+# Plot the whole DataFrame in one go on the left subplot (ax1)
+df.plot(ax=ax1)
 
+# Move the original legend to the top left
+ax1.legend(loc='upper left', frameon=True)
 
+# Retrieve the color cycle from the axes (to get the colors for each line)
+lines = ax1.get_lines()  # Get the lines from the first plot
+colors = [line.get_color() for line in lines]  # Extract the color used for each time series
+
+# Define the comments for each series
+comments = [
+    ("Comp Growth", "went up. The others were muted."),
+    ("Value", "went down.")
+]
+
+# Create a divider for an additional space to the right of the plot
+divider = make_axes_locatable(ax1)
+ax2 = divider.append_axes("right", size="30%", pad=0.1)
+ax2.axis("off")  # Hide the axis for the legend text box
+
+# Create a list of legend handles and labels based on the comments
+legend_handles = []
+legend_labels = []
+
+for i, (series_name, comment) in enumerate(comments):
+    # Find the corresponding line color
+    color = colors[i]
+    
+    # Create a dummy line handle to use in the legend (just a colored line with no data)
+    line_handle = plt.Line2D([0], [0], color=color, lw=2)
+    legend_handles.append(line_handle)
+    
+    # Format the label with series name and comment without showing it as a tuple
+    legend_label = f"{series_name}: {comment}"
+    legend_labels.append(legend_label)
+
+# Use the legend to create the text box with color and comments
+ax2.legend(legend_handles, legend_labels, loc='upper left', frameon=False)
+
+# Adjust layout to prevent shrinking of the main plot
+plt.subplots_adjust(left=0.1, right=0.9, wspace=0.4)
+
+# Show the plot
+plt.show()
