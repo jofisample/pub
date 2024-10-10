@@ -3,6 +3,32 @@ import pandas as pd
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+def auto_wrap_text(text, max_line_length=30):
+    """
+    Automatically insert line breaks into a text string
+    such that no line exceeds max_line_length characters.
+    """
+    words = text.split(' ')
+    lines = []
+    current_line = []
+
+    current_length = 0
+    for word in words:
+        if current_length + len(word) + 1 <= max_line_length:  # +1 for space
+            current_line.append(word)
+            current_length += len(word) + 1
+        else:
+            lines.append(' '.join(current_line))
+            current_line = [word]
+            current_length = len(word) + 1
+
+    # Append the last line
+    if current_line:
+        lines.append(' '.join(current_line))
+
+    # Return the text with newlines
+    return '\n'.join(lines)
+
 # Generate example data with descriptive column names
 dates = pd.date_range('2023-01-01', periods=100)
 df = pd.DataFrame(np.random.randn(100, 5), index=dates, columns=['Comp Growth', 'Price Momentum', 'Growth Factor', 'Value', 'Quality'])
@@ -20,15 +46,19 @@ ax1.legend(loc='upper left', frameon=True)
 lines = ax1.get_lines()  # Get the lines from the first plot
 colors = [line.get_color() for line in lines]  # Extract the color used for each time series
 
-# Define the comments for each series
+# Define the comments for each series with auto-wrapped text
 comments = [
-    ("Comp Growth", "went up. The others were muted."),
-    ("Value", "went down.")
+    ("Comp Growth", "Comp Growth went up. The others were muted."),
+    ("Value", "Value went down. The market showed volatility."),
+    ("Price Momentum", "Price Momentum remained steady."),
+    ("Growth Factor", "Growth Factor saw significant gains."),
+    ("Quality", "Quality underperformed in recent months.")
 ]
 
 # Create a divider for an additional space to the right of the plot
 divider = make_axes_locatable(ax1)
-ax2 = divider.append_axes("right", size="30%", pad=0.1)
+# Assign a smaller width to the box on the right by reducing the size percentage
+ax2 = divider.append_axes("right", size="20%", pad=0.1)  # Reduce the size from 30% to 20%
 ax2.axis("off")  # Hide the axis for the legend text box
 
 # Create a list of legend handles and labels based on the comments
@@ -43,15 +73,16 @@ for i, (series_name, comment) in enumerate(comments):
     line_handle = plt.Line2D([0], [0], color=color, lw=2)
     legend_handles.append(line_handle)
     
-    # Format the label with series name and comment without showing it as a tuple
-    legend_label = f"{series_name}: {comment}"
+    # Format the label with series name and comment, using the auto-wrapped text
+    wrapped_comment = auto_wrap_text(comment, max_line_length=30)  # Reduce max_line_length for earlier wrapping
+    legend_label = f"{series_name}: {wrapped_comment}"
     legend_labels.append(legend_label)
 
 # Use the legend to create the text box with color and comments
 ax2.legend(legend_handles, legend_labels, loc='upper left', frameon=False)
 
 # Adjust layout to prevent shrinking of the main plot
-plt.subplots_adjust(left=0.1, right=0.9, wspace=0.4)
+plt.subplots_adjust(left=0.1, right=0.85, wspace=0.4)
 
 # Show the plot
 plt.show()
