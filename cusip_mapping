@@ -1,151 +1,356 @@
 import os
 import re
-import pandas as pd
-import numpy as np
 import datetime as dt
-from pandas.tseries.offsets import BDay
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib.ticker as ticker
+from pandas.tseries.offsets import BDay
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from utils.qis_plot import qis_plot as qp
 
-class FactorPerformancePlotter:
-    def __init__(self, region, prodpy, mappingspath, qmpath):
-        self.region = region
-        self.prodpy = prodpy
-        self.mappingspath = mappingspath
-        self.qmpath = qmpath
-        self.raw_data = None
-        self.mappings = None
-        self.df = None
-        self.comments = [
-            ("CG", "Comp Growth went up. The others were muted."),
-            ("CV", "Value went down. The market showed volatility. Value went down. The market showed volatility")
-        ]
+# Centralized configuration variables
+right_box_ratio = 0.2
+max_width_characters = 20
+font_size = 8
+plot_width = 10
+plot_height = 5
 
-    def load_data(self):
-        file_path = os.path.join(self.prodpy, f"TP_FactorDailyPerf_Ret_5Y_USD_0_E_3.xlsx")
-        self.raw_data = pd.read_excel(file_path)
-        self.raw_data["EOMD"] = pd.to_datetime(self.raw_data["EOMD"])
-
-    def filter_data(self):
-        today = dt.datetime.today()
-        one_month_back = today - pd.DateOffset(months=1)
-        end_of_last_month = one_month_back.replace(day=1) + pd.DateOffset(months=1) - pd.DateOffset(days=1)
-        end_of_same_month_last_year = end_of_last_month - pd.DateOffset(years=1) - BDay(1)
-
-        self.raw_data = self.raw_data[
-            (self.raw_data["EOMD"].dt.date >= end_of_same_month_last_year.date()) &
-            (self.raw_data["EOMD"].dt.date <= end_of_last_month.date())
-        ]
-        self.raw_data.set_index("EOMD", inplace=True)
-
-    def process_data(self):
-        lst = ["CV_0_USD_E_3", "CG_0_USD_E_3", "CM_0_USD_E_3", "CQ_0_USD_E_3", "VOL_0_USD_E_3", "FLCAPD_0_USD_E_3"]
-        cols = [f"{self.region}_{i}" for i in lst]
-
-        self.df = self.raw_data[cols].copy()
-        self.df.iloc[0] = 0
-        self.df = (1 + self.df.fillna(0)).cumprod() * 100
-        self.df.columns = [re.sub(r"[A-Z]+_(.*?)_0_USD_E_3", r"\1", col) for col in self.df.columns]
-
-    def load_mappings(self):
-        mappings_df = pd.read_excel(self.mappingspath, sheet_name="Factor Code")
-        self.mappings = pd.Series(mappings_df["Short_Name"].values, index=mappings_df["FACTOR"]).to_dict()
-
-    def auto_wrap_text(self, text, max_line_length=30):
-        words = text.split(' ')
-        lines, current_line = [], []
-        current_length = 0
-
-        for word in words:
-            if current_length + len(word) + 1 <= max_line_length:  # +1 for space
-                current_line.append(word)
-                current_length += len(word) + 1
-            else:
-                lines.append(' '.join(current_line))
-                current_line = [word]
-                current_length = len(word) + 1
-        if current_line:
+def auto_wrap_text(text, max_line_length=max_width_characters):
+    """Auto insert line breaks (\n) into text so that no line exceeds max_line_length chars."""
+    words = text.split(' ')
+    lines = []
+    current_line = []
+    current_length = 0
+    for word in words:
+        if current_length + len(word) + 1 <= max_line_length:  # +1 for space
+            current_line.append(word)
+            current_length += len(word) + 1
+        else:
             lines.append(' '.join(current_line))
-
-        return '\n'.join(lines)
-
-    def plot(self):
-        valid_elements = self.df.columns.tolist()
-        fig, ax1 = plt.subplots(figsize=(10, 5))
-        qp.plot(self.df.rename(columns=self.mappings), ax=ax1)
-
-        ax1.legend(loc='upper left', frameon=True)
-        color_cycle = ax1._get_lines.prop_cycler
-        colors = [next(color_cycle)["color"] for _ in range(self.df.shape[1])]
-        series_names = self.df.columns.tolist()
-        dic = dict(zip(series_names, colors))
-
-        right_box_ratio = 0.2
-        max_width_characters = 20
-
-        divider = make_axes_locatable(ax1)
-        ax2 = divider.append_axes("right", size=f"{right_box_ratio * 100}%", pad=0.1)
-        ax2.axis("off")  # Hide the axis for the legend text box
-
-        # Create a list of legend handles and labels based on the comments
-        legend_handles = []
-        legend_labels = []
-
-        for series_name, comment in self.comments:
-            assert series_name in valid_elements, f"{series_name} is not a valid factor"
-            line_handle = plt.Line2D([0], [0], color=dic[series_name], lw=2)  # Dummy line handle for legend
-            legend_handles.append(line_handle)
-
-            # Format the label with series name and comment
-            wrapped_comment = self.auto_wrap_text(comment, max_width_characters)
-            legend_label = f"{wrapped_comment}"
-            legend_labels.append(legend_label)
-
-        ax2.legend(legend_handles, legend_labels, loc='upper left', frameon=False, prop={"size": 8})
-
-        # Format the x-axis dates
-        date_format = mdates.DateFormatter("%b-%y")
-        ax1.xaxis.set_major_formatter(date_format)
-        ax1.xaxis.set_major_locator(mdates.MonthLocator())
-        ax1.xaxis.set_minor_locator(ticker.NullLocator())
-
-        # Customize tick labels and positions
-        tick_positions = np.linspace(self.df.index.min().value, self.df.index.max().value, 13)
-        tick_positions = pd.to_datetime(tick_positions)
-        tick_labels = [(d + pd.DateOffset(months=1)).strftime("%b-%y") for d in tick_positions]
-        tick_labels[-1] = ""
-
-        shade_start, shade_end = tick_positions[-2], tick_positions[-1]
-        ax1.axvspan(shade_start, shade_end, facecolor="gray", alpha=0.3, edgecolor="none")
-
-        ax1.set_xticks(tick_positions)
-        ax1.set_xticklabels(tick_labels)
-        ax1.tick_params(axis="x", labelsize=9)
-        ax1.tick_params(axis="y", labelsize=9)
-        plt.tight_layout()
-
-        today_str = dt.datetime.today().strftime("%Y%m%d")
-        figname = f"factorperformance_{self.region}_{today_str}.png"
-        plt.savefig(os.path.join(self.qmpath, "plots", figname), dpi=600)
-        plt.close()
-
-    def run(self):
-        self.load_data()
-        self.filter_data()
-        self.process_data()
-        self.load_mappings()
-        self.plot()
+            current_line = [word]
+            current_length = len(word) + 1
+    if current_line:
+        lines.append(' '.join(current_line))
+    return '\n'.join(lines)
 
 
-# Example usage for three regions:
-regions = ["US", "EU", "APAC"]
-prodpy = "/path/to/prodpy"
-mappingspath = "/path/to/mappings"
-qmpath = "/path/to/qmpath"
+def load_data(raw_data_path, mappings_path):
+    """Load and prepare raw data for processing."""
+    raw = pd.read_excel(raw_data_path)
+    raw["EOMD"] = pd.to_datetime(raw["EOMD"])
 
-for region in regions:
-    plotter = FactorPerformancePlotter(region, prodpy, mappingspath, qmpath)
-    plotter.run()
+    today = dt.datetime.today()
+    one_month_back = today - pd.DateOffset(months=1)
+    end_of_last_month = one_month_back.replace(day=1) + pd.DateOffset(months=1) - pd.DateOffset(days=1)
+    end_of_same_month_last_year = end_of_last_month - pd.DateOffset(years=1) - BDay(1)
+
+    raw = raw[(raw["EOMD"].dt.date >= end_of_same_month_last_year.date()) &
+              (raw["EOMD"].dt.date <= end_of_last_month.date())]
+    raw.set_index("EOMD", inplace=True)
+
+    mappingsxlsx = pd.read_excel(mappings_path, sheet_name="Factor Code")
+    mappings = pd.Series(mappingsxlsx["Short_Name"].values, index=mappingsxlsx["FACTOR"]).to_dict()
+    
+    return raw, mappings
+
+
+def plot_data_for_region(raw, mappings, region, lst, comments, output_path):
+    """Plot data for a specific region."""
+    cols = [f"{region}_{i}" for i in lst]
+    
+    # Filter and process data for the selected region
+    df = raw[cols].copy()
+    df.iloc[0] = 0
+    df = (1 + df.fillna(0)).cumprod() * 100
+    df.columns = [re.sub(r"[A-Z]+_(.*?)_0_USD_E_3", r"\1", col) for col in df.columns]
+    
+    valid_elements = df.columns.tolist()
+
+    # Create plot
+    fig, ax1 = plt.subplots(figsize=(plot_width, plot_height))
+    qp.plot(df.rename(columns=mappings), ax=ax1)
+
+    ax1.legend(loc='upper left', frameon=True)
+    lines = ax1.get_lines()
+    color_cycle = ax1._get_lines.prop_cycler
+    colors = [next(color_cycle)["color"] for _ in range(df.shape[1])]
+    
+    series_names = df.columns.tolist()
+    dic = dict(zip(series_names, colors))
+    
+    # Add comments
+    divider = make_axes_locatable(ax1)
+    ax2 = divider.append_axes("right", size=f"{right_box_ratio * 100}%", pad=0.1)
+    ax2.axis("off")
+
+    legend_handles = []
+    legend_labels = []
+
+    for series_name, comment in comments:
+        assert series_name in valid_elements, f"{series_name} is not a valid factor"
+        line_handle = plt.Line2D([0], [0], color=dic[series_name], lw=2)
+        legend_handles.append(line_handle)
+        wrapped_comment = auto_wrap_text(comment)
+        legend_labels.append(wrapped_comment)
+
+    ax2.legend(legend_handles, legend_labels, loc='upper left', frameon=False, prop={"size": font_size})
+
+    # Format date on the x-axis
+    date_format = mdates.DateFormatter("%b-%y")
+    ax1.xaxis.set_major_formatter(date_format)
+    ax1.xaxis.set_major_locator(mdates.MonthLocator())
+    ax1.xaxis.set_minor_locator(ticker.NullLocator())
+
+    tick_positions = np.linspace(df.index.min().value, df.index.max().value, 13)
+    tick_positions = pd.to_datetime(tick_positions)
+    tick_labels = [(d + pd.DateOffset(months=1)).strftime("%b-%y") for d in tick_positions]
+    tick_labels[-1] = ""
+
+    shade_start = tick_positions[-2]
+    shade_end = tick_positions[-1]
+
+    ax1.axvspan(shade_start, shade_end, facecolor="gray", alpha=0.3, edgecolor="none")
+    ax1.set_xticks(tick_positions)
+    ax1.set_xticklabels(tick_labels)
+    ax1.tick_params(axis="x", labelsize=9)
+    ax1.tick_params(axis="y", labelsize=9)
+
+    plt.tight_layout()
+
+    # Save the figure
+    today = dt.datetime.today().strftime("%Y%m%d")
+    figname = f"factorperformance_{region}_{today}.png"
+    plt.savefig(os.path.join(output_path, "plots", figname), dpi=600)
+    plt.close(fig)
+
+
+def process_all_regions(regions, raw_data_path, mappings_path, output_path, lst, comments):
+    """Process and plot data for all regions."""
+    raw, mappings = load_data(raw_data_path, mappings_path)
+    
+    for region in regions:
+        plot_data_for_region(raw, mappings, region, lst, comments, output_path)
+
+
+# Define your parameters
+regions = ["US", "EU"]
+raw_data_path = os.path.join("path_to_data", "TP_FactorDailyPerf_Ret_5Y_USD_0_E_3.xlsx")
+mappings_path = os.path.join("path_to_mappings", "mappings.xlsx")
+output_path = "output_path"
+lst = ["CV_0_USD_E_3", "CG_0_USD_E_3", "CM_0_USD_E_3", "CQ_0_USD_E_3", "VOL_0_USD_E_3", "FLCAPD_0_USD_E_3"]
+comments = [
+    ("CG", "Comp Growth went up. The others were muted."),
+    ("CV", "Value went down. The market showed volatility. Value went down. The market showed volatility")
+]
+
+# Run the process for all regions
+process_all_regions(regions, raw_data_path, mappings_path, output_path, lst, comments)
+
+
+import os
+import re
+import datetime as dt
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.ticker as ticker
+from pandas.tseries.offsets import BDay
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from utils.qis_plot import qis_plot as qp
+
+# Centralized configuration variables
+right_box_ratio = 0.2
+max_width_characters = 20
+font_size = 8
+plot_width = 10
+plot_height = 5
+
+def auto_wrap_text(text, max_line_length=max_width_characters):
+    """Auto insert line breaks (\n) into text so that no line exceeds max_line_length chars."""
+    words = text.split(' ')
+    lines = []
+    current_line = []
+    current_length = 0
+    for word in words:
+        if current_length + len(word) + 1 <= max_line_length:  # +1 for space
+            current_line.append(word)
+            current_length += len(word) + 1
+        else:
+            lines.append(' '.join(current_line))
+            current_line = [word]
+            current_length = len(word) + 1
+    if current_line:
+        lines.append(' '.join(current_line))
+    return '\n'.join(lines)
+
+
+def load_data(raw_data_path, mappings_path):
+    """Load and prepare raw data for processing."""
+    raw = pd.read_excel(raw_data_path)
+    raw["EOMD"] = pd.to_datetime(raw["EOMD"])
+
+    today = dt.datetime.today()
+    one_month_back = today - pd.DateOffset(months=1)
+    end_of_last_month = one_month_back.replace(day=1) + pd.DateOffset(months=1) - pd.DateOffset(days=1)
+    end_of_same_month_last_year = end_of_last_month - pd.DateOffset(years=1) - BDay(1)
+
+    raw = raw[(raw["EOMD"].dt.date >= end_of_same_month_last_year.date()) &
+              (raw["EOMD"].dt.date <= end_of_last_month.date())]
+    raw.set_index("EOMD", inplace=True)
+
+    mappingsxlsx = pd.read_excel(mappings_path, sheet_name="Factor Code")
+    mappings = pd.Series(mappingsxlsx["Short_Name"].values, index=mappingsxlsx["FACTOR"]).to_dict()
+    
+    return raw, mappings
+
+
+def plot_data_for_region(raw, mappings, region, lst, comments, output_path):
+    """Plot data for a specific region."""
+    cols = [f"{region}_{i}" for i in lst]
+    
+    # Filter and process data for the selected region
+    df = raw[cols].copy()
+    df.iloc[0] = 0
+    df = (1 + df.fillna(0)).cumprod() * 100
+    df.columns = [re.sub(r"[A-Z]+_(.*?)_0_USD_E_3", r"\1", col) for col in df.columns]
+    
+    valid_elements = df.columns.tolist()
+
+    # Create plot
+    fig, ax1 = plt.subplots(figsize=(plot_width, plot_height))
+    qp.plot(df.rename(columns=mappings), ax=ax1)
+
+    ax1.legend(loc='upper left', frameon=True)
+    lines = ax1.get_lines()
+    color_cycle = ax1._get_lines.prop_cycler
+    colors = [next(color_cycle)["color"] for _ in range(df.shape[1])]
+    
+    series_names = df.columns.tolist()
+    dic = dict(zip(series_names, colors))
+    
+    # Add comments
+    divider = make_axes_locatable(ax1)
+    ax2 = divider.append_axes("right", size=f"{right_box_ratio * 100}%", pad=0.1)
+    ax2.axis("off")
+
+    legend_handles = []
+    legend_labels = []
+
+    for series_name, comment in comments:
+        assert series_name in valid_elements, f"{series_name} is not a valid factor"
+        line_handle = plt.Line2D([0], [0], color=dic[series_name], lw=2)
+        legend_handles.append(line_handle)
+        wrapped_comment = auto_wrap_text(comment)
+        legend_labels.append(wrapped_comment)
+
+    ax2.legend(legend_handles, legend_labels, loc='upper left', frameon=False, prop={"size": font_size})
+
+    # Format date on the x-axis
+    date_format = mdates.DateFormatter("%b-%y")
+    ax1.xaxis.set_major_formatter(date_format)
+    ax1.xaxis.set_major_locator(mdates.MonthLocator())
+    ax1.xaxis.set_minor_locator(ticker.NullLocator())
+
+    tick_positions = np.linspace(df.index.min().value, df.index.max().value, 13)
+    tick_positions = pd.to_datetime(tick_positions)
+    tick_labels = [(d + pd.DateOffset(months=1)).strftime("%b-%y") for d in tick_positions]
+    tick_labels[-1] = ""
+
+    shade_start = tick_positions[-2]
+    shade_end = tick_positions[-1]
+
+    ax1.axvspan(shade_start, shade_end, facecolor="gray", alpha=0.3, edgecolor="none")
+    ax1.set_xticks(tick_positions)
+    ax1.set_xticklabels(tick_labels)
+    ax1.tick_params(axis="x", labelsize=9)
+    ax1.tick_params(axis="y", labelsize=9)
+
+    plt.tight_layout()
+
+    # Save the figure
+    today = dt.datetime.today().strftime("%Y%m%d")
+    figname = f"factorperformance_{region}_{today}.png"
+    plt.savefig(os.path.join(output_path, "plots", figname), dpi=600)
+    plt.close(fig)
+
+
+def get_last_month_performance(df):
+    """
+    Calculate the percentage change for each factor in the last month.
+    
+    Parameters:
+    - df: A pandas DataFrame with date-indexed data.
+    
+    Returns:
+    - A dictionary with factor names as keys and their performance as values.
+    """
+    last_month_end = df.index.max()  # Last date in the dataframe
+    last_month_start = last_month_end - pd.DateOffset(months=1)
+    
+    # Find the start and end of the last fully passed month
+    start_value = df[df.index >= last_month_start].iloc[0]
+    end_value = df[df.index == last_month_end].iloc[0]
+
+    # Calculate percentage performance
+    performance_dict = ((end_value - start_value) / start_value * 100).to_dict()
+
+    return performance_dict
+
+
+def generate_comments_from_performance(performance_dict):
+    """
+    Generate a list of comments based on the performance of each factor.
+    
+    Parameters:
+    - performance_dict: A dictionary with factor names and their percentage performance.
+    
+    Returns:
+    - A list of tuples containing factor name and a comment on whether it went up or down.
+    """
+    comments = []
+    for factor, performance in performance_dict.items():
+        if performance > 0:
+            comment = f"Up {performance:.2f}%"
+        else:
+            comment = f"Down {abs(performance):.2f}%"
+        comments.append((factor, comment))
+    
+    return comments
+
+
+def process_all_regions(regions, raw_data_path, mappings_path, output_path, lst):
+    """Process and plot data for all regions."""
+    raw, mappings = load_data(raw_data_path, mappings_path)
+    
+    for region in regions:
+        # Filter the relevant data for the region
+        cols = [f"{region}_{i}" for i in lst]
+        df_region = raw[cols].copy()
+        df_region.iloc[0] = 0
+        df_region = (1 + df_region.fillna(0)).cumprod() * 100
+        df_region.columns = [re.sub(r"[A-Z]+_(.*?)_0_USD_E_3", r"\1", col) for col in df_region.columns]
+
+        # Get the last month's performance
+        performance_dict = get_last_month_performance(df_region)
+
+        # Generate comments based on performance
+        comments = generate_comments_from_performance(performance_dict)
+
+        # Plot the data with generated comments
+        plot_data_for_region(raw, mappings, region, lst, comments, output_path)
+
+
+# Define your parameters
+regions = ["US", "EU"]
+raw_data_path = os.path.join("path_to_data", "TP_FactorDailyPerf_Ret_5Y_USD_0_E_3.xlsx")
+mappings_path = os.path.join("path_to_mappings", "mappings.xlsx")
+output_path = "output_path"
+lst = ["CV_0_USD_E_3", "CG_0_USD_E_3", "CM_0_USD_E_3", "CQ_0_USD_E_3", "VOL_0_USD_E_3", "FLCAPD_0_USD_E_3"]
+
+# Run the process for all regions
+process_all_regions(regions, raw_data_path, mappings_path, output_path, lst)
+
+
