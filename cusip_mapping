@@ -1,0 +1,158 @@
+import pandas as pd
+import numpy as np
+
+# -------------------------------
+# 1. Define Your Lists of Factors
+# -------------------------------
+
+# Factors applicable to all countries
+all_countries_factors = ['CV', 'CG', 'CM', 'CQ', 'PEG', 'IGRO', 'ROIC']
+
+# Factors specific to US, EU, and JP
+us_factors = ['FCFO', 'UPD3', 'BBY']
+eu_factors = ['FCFO', 'UPD3', 'BBY']
+jp_factors = ['BBY', 'PEG', 'CAPD']
+
+# -------------------------------
+# 2. Create the Initial DataFrame
+# -------------------------------
+
+# Prepare the rows for the DataFrame
+rows = []
+
+# Add 'all' country factors
+for factor in all_countries_factors:
+    rows.append({'Factors': factor, 'Country': 'all'})
+
+# Add 'US' factors
+for factor in us_factors:
+    rows.append({'Factors': factor, 'Country': 'US'})
+
+# Add 'EU' factors
+for factor in eu_factors:
+    rows.append({'Factors': factor, 'Country': 'EU'})
+
+# Add 'JP' factors
+for factor in jp_factors:
+    rows.append({'Factors': factor, 'Country': 'JP'})
+
+# Define the columns as per your requirement
+columns = [
+    'Factors', 'Country', 'YTD',
+    'US_MTD', 'US_WTD',
+    'EU_YTD', 'EU_MTD', 'EU_WTD',
+    'JP_YTD', 'JP_MTD', 'JP_WTD'
+]
+
+# Create the DataFrame
+df = pd.DataFrame(rows, columns=columns)
+
+# Initialize all value columns with empty strings
+value_columns = [
+    'YTD', 'US_MTD', 'US_WTD',
+    'EU_YTD', 'EU_MTD', 'EU_WTD',
+    'JP_YTD', 'JP_MTD', 'JP_WTD'
+]
+df[value_columns] = ''
+
+# -------------------------------
+# 3. Create Dummy `dic` Dictionary
+# -------------------------------
+
+# For demonstration, let's create dummy data
+np.random.seed(0)  # For reproducible results
+
+# Function to generate random percentage values
+def generate_random_percentages(factors):
+    return {
+        factor: {
+            'YTD': np.random.uniform(0, 10),
+            'MTD': np.random.uniform(0, 5),
+            'WTD': np.random.uniform(0, 2)
+        }
+        for factor in factors
+    }
+
+# Create the `dic` dictionary with dummy DataFrames
+dic = {
+    'US': pd.DataFrame(generate_random_percentages(us_factors)).T,
+    'EU': pd.DataFrame(generate_random_percentages(eu_factors)).T,
+    'JP': pd.DataFrame(generate_random_percentages(jp_factors)).T
+}
+
+# -------------------------------
+# 4. Define Helper Function
+# -------------------------------
+
+# Function to format values as percentages
+def format_percentage(value):
+    return f"{value:.2f}%" if pd.notnull(value) else ''
+
+# -------------------------------
+# 5. Populate the DataFrame
+# -------------------------------
+
+for idx, row in df.iterrows():
+    factor = row['Factors']
+    country = row['Country']
+    
+    if country == 'all':
+        # Aggregate values from all countries where the factor exists
+        ytd_values = []
+        mtd_values = []
+        wtd_values = []
+        
+        for c in ['US', 'EU', 'JP']:
+            if factor in dic[c].index:
+                ytd_values.append(dic[c].loc[factor, 'YTD'])
+                mtd_values.append(dic[c].loc[factor, 'MTD'])
+                wtd_values.append(dic[c].loc[factor, 'WTD'])
+        
+        if ytd_values:
+            # Example aggregation: average
+            avg_ytd = np.mean(ytd_values)
+            avg_mtd = np.mean(mtd_values)
+            avg_wtd = np.mean(wtd_values)
+            
+            df.at[idx, 'YTD'] = format_percentage(avg_ytd)
+            df.at[idx, 'US_MTD'] = format_percentage(avg_mtd) if 'US' in [c for c in ['US', 'EU', 'JP'] if factor in dic[c].index] else ''
+            df.at[idx, 'US_WTD'] = format_percentage(avg_wtd) if 'US' in [c for c in ['US', 'EU', 'JP'] if factor in dic[c].index] else ''
+            df.at[idx, 'EU_YTD'] = format_percentage(avg_ytd) if 'EU' in [c for c in ['US', 'EU', 'JP'] if factor in dic[c].index] else ''
+            df.at[idx, 'EU_MTD'] = format_percentage(avg_mtd) if 'EU' in [c for c in ['US', 'EU', 'JP'] if factor in dic[c].index] else ''
+            df.at[idx, 'EU_WTD'] = format_percentage(avg_wtd) if 'EU' in [c for c in ['US', 'EU', 'JP'] if factor in dic[c].index] else ''
+            df.at[idx, 'JP_YTD'] = format_percentage(avg_ytd) if 'JP' in [c for c in ['US', 'EU', 'JP'] if factor in dic[c].index] else ''
+            df.at[idx, 'JP_MTD'] = format_percentage(avg_mtd) if 'JP' in [c for c in ['US', 'EU', 'JP'] if factor in dic[c].index] else ''
+            df.at[idx, 'JP_WTD'] = format_percentage(avg_wtd) if 'JP' in [c for c in ['US', 'EU', 'JP'] if factor in dic[c].index] else ''
+    
+    else:
+        # Populate based on the specific country
+        if factor in dic[country].index:
+            ytd = dic[country].loc[factor, 'YTD']
+            mtd = dic[country].loc[factor, 'MTD']
+            wtd = dic[country].loc[factor, 'WTD']
+            
+            # Assign values to the appropriate columns
+            if country == 'US':
+                df.at[idx, 'YTD'] = format_percentage(ytd)
+                df.at[idx, 'US_MTD'] = format_percentage(mtd)
+                df.at[idx, 'US_WTD'] = format_percentage(wtd)
+            elif country == 'EU':
+                df.at[idx, 'EU_YTD'] = format_percentage(ytd)
+                df.at[idx, 'EU_MTD'] = format_percentage(mtd)
+                df.at[idx, 'EU_WTD'] = format_percentage(wtd)
+            elif country == 'JP':
+                df.at[idx, 'JP_YTD'] = format_percentage(ytd)
+                df.at[idx, 'JP_MTD'] = format_percentage(mtd)
+                df.at[idx, 'JP_WTD'] = format_percentage(wtd)
+
+# -------------------------------
+# 6. Display the Final DataFrame
+# -------------------------------
+
+df.replace('', np.nan, inplace=True)
+
+# Optionally, set display options for better readability
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+
+print(df)
