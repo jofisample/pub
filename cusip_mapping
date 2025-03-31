@@ -1,5 +1,16 @@
 
 # -----------------------------
+# Model Initialization (Main Execution)
+# -----------------------------
+models = r"T:/Team/StephanH/temp"
+
+mpnet_path = os.path.join(models, "all-mpnet-base-v2")
+mpnet = SentenceTransformer(mpnet_path)
+
+finbert_path = os.path.join(models, "ProsusAI-finbert")
+finbert = pipeline("sentiment-analysis", model=finbert_path)
+
+# -----------------------------
 # Module 0: Download NLTK Resources
 # -----------------------------
 nltk.download('punkt', quiet=True)
@@ -86,7 +97,6 @@ def categorize_sentence_changes(prev_sentences, curr_sentences, model, base_thre
             if sim < base_threshold:
                 categories["removed"].append(filtered_prev[j])
     else:
-        # If filtered lists are empty, then mark any previous sentence not in exact_unchanged as removed.
         for s in prev_sentences:
             if s not in exact_unchanged:
                 categories["removed"].append(s)
@@ -117,25 +127,36 @@ def process_filing_row(row, model):
                                                 unchanged_threshold=0.95)
     return (cik, pair_key, category_dict)
 
-def process_filings_categories(df, model):
+def process_filings_categories_chunked(df, model, chunk_size=200, output_dir="."):
     """
-    Process the entire DataFrame in parallel to generate a dictionary of categorized sentences.
-    Top-level keys: cik.
-    Sub-dictionary keys: a string representing the filing pair (prev_filing_accno + "_" + accno).
-    Each value is the output of categorize_sentence_changes.
+    Process the DataFrame in chunks of chunk_size rows using parallel processing
+    (with threading backend) to generate a dictionary of categorized sentences.
+    After processing each chunk, save the partial result (including a timestamp)
+    to a pickle file so progress is preserved.
+    
+    Returns the combined dictionary of categorized sentences.
     """
     results = {}
     rows = df.to_dict(orient='records')
-    processed = Parallel(n_jobs=-1)(
-        delayed(process_filing_row)(row, model) for row in tqdm(rows, total=len(rows))
-    )
-    for res in processed:
-        if res is None:
-            continue
-        cik, pair_key, category_dict = res
-        if cik not in results:
-            results[cik] = {}
-        results[cik][pair_key] = category_dict
+    total = len(rows)
+    for i in range(0, total, chunk_size):
+        chunk = rows[i:i+chunk_size]
+        processed = Parallel(n_jobs=-1, backend="threading")(
+            delayed(process_filing_row)(row, model=model) for row in tqdm(chunk, total=len(chunk), desc=f"Processing rows {i} to {i+len(chunk)}")
+        )
+        for res in processed:
+            if res is None:
+                continue
+            cik, pair_key, category_dict = res
+            if cik not in results:
+                results[cik] = {}
+            results[cik][pair_key] = category_dict
+        # Save partial results with a timestamp
+        timestamp = pd.Timestamp.today().strftime("%Y%m%d_%H%M%S")
+        partial_filename = os.path.join(output_dir, f"filings_sentence_categories_{i}_{timestamp}.pkl")
+        with open(partial_filename, "wb") as f:
+            pickle.dump(results, f)
+        print(f"Chunk {i} processed and saved to {partial_filename}.")
     return results
 
 # -----------------------------
@@ -156,7 +177,7 @@ def process_sentiments_without_gpt(categorized_dict, finbert_pipeline):
     Process the categorized dictionary (from Phase 1) to compute FinBERT sentiment results.
     For the "unchanged" category, assign a label "unchanged" to each sentence.
     Returns a new dictionary where for each filing pair and for each category,
-    each sentence is mapped to its FinBERT sentiment.
+    each sentence is mapped to its sentiment result.
     """
     results = {}
     for cik, filing_dict in categorized_dict.items():
@@ -165,7 +186,6 @@ def process_sentiments_without_gpt(categorized_dict, finbert_pipeline):
             sentiment_results = {}
             for category, sentences in categories.items():
                 if category == "unchanged":
-                    # Assign unchanged label
                     sentiment_results[category] = {s: {"label": "unchanged", "score": None} for s in sentences}
                 else:
                     sentiment_results[category] = analyze_sentiment(sentences, finbert_pipeline)
@@ -177,7 +197,7 @@ def process_sentiments_without_gpt(categorized_dict, finbert_pipeline):
 # -----------------------------
 def correct_sentiments_with_gpt(sentiment_dict):
     """
-    For each sentence in sentiment_dict (mapping sentence to FinBERT sentiment),
+    For each sentence in sentiment_dict (mapping sentence to sentiment result),
     call GPT-4 Turbo (via invoke_completions) to determine the correct sentiment.
     Expects GPT-4 Turbo to return exactly one word: positive, negative, or neutral.
     If correction is applied, backup the original label in "original_label" and overwrite "label".
@@ -243,14 +263,14 @@ def aggregate_sentiment_scores(sentiment_dict):
         aggregated[category] = {"avg_sentiment": avg, "scores": scores}
     return aggregated
 
-def aggregate_for_all_filings(sentiment_dict):
+def aggregate_for_all_filings(sentiments_dict):
     """
     Given the updated sentiment dictionary for all filings (keyed by cik and filing pair),
     aggregate sentiment scores for each filing pair.
     Returns a nested dictionary with aggregated sentiment scores.
     """
     aggregated_results = {}
-    for cik, filing_dict in sentiment_dict.items():
+    for cik, filing_dict in sentiments_dict.items():
         aggregated_results[cik] = {}
         for pair_key, cat_scores in filing_dict.items():
             aggregated_results[cik][pair_key] = aggregate_sentiment_scores(cat_scores)
@@ -298,41 +318,8 @@ if __name__ == "__main__":
     # Load the DataFrame (ensure pklpath is set correctly)
     df = pd.read_pickle(pklpath + "f.pkl").reset_index(drop=True)
     
-    # ----- Phase 1: Sentence Categorization with Parallel Processing -----
-    from joblib import Parallel, delayed
-    from tqdm import tqdm
-
-    def process_filing_row(row, model):
-        cik = row["cik"]
-        accno = row["accno"]
-        prev_filing_accno = row["prev_filing_accno"]
-        pair_key = f"{prev_filing_accno}_{accno}"
-        
-        text_prev = pull_filing(cik, prev_filing_accno)
-        text_curr = pull_filing(cik, accno)
-        prev_sentences = split_into_sentences(text_prev)
-        curr_sentences = split_into_sentences(text_curr)
-        
-        if not prev_sentences or not curr_sentences:
-            return None
-        category_dict = categorize_sentence_changes(prev_sentences, curr_sentences,
-                                                    model=model,
-                                                    base_threshold=0.7,
-                                                    unchanged_threshold=0.95)
-        return (cik, pair_key, category_dict)
-    
-    rows = df.to_dict(orient='records')
-    processed = Parallel(n_jobs=-1)(
-        delayed(process_filing_row)(row, model=mpnet) for row in tqdm(rows, total=len(rows))
-    )
-    categories_dict = {}
-    for res in processed:
-        if res is None:
-            continue
-        cik, pair_key, category_dict = res
-        if cik not in categories_dict:
-            categories_dict[cik] = {}
-        categories_dict[cik][pair_key] = category_dict
+    # ----- Phase 1: Sentence Categorization with Chunking -----
+    categories_dict = process_filings_categories_chunked(df, model=mpnet, chunk_size=200, output_dir=pklpath)
     with open("filings_sentence_categories.pkl", "wb") as f:
         pickle.dump(categories_dict, f)
     print("Phase 1 complete: Categorized sentences saved.")
