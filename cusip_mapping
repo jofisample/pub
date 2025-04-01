@@ -1,86 +1,40 @@
 
-# -----------------------------
-# Model Initialization (Main Execution)
-# -----------------------------
-models = r"T:/Team/StephanH/temp"
-
 mpnet_path = os.path.join(models, "all-mpnet-base-v2")
 mpnet = SentenceTransformer(mpnet_path)
 
 finbert_path = os.path.join(models, "ProsusAI-finbert")
 finbert = pipeline("sentiment-analysis", model=finbert_path)
 
-# -----------------------------
-# Module 0: Download NLTK Resources
-# -----------------------------
 nltk.download('punkt', quiet=True)
 
-# -----------------------------
-# Module 1: Filing Text Retrieval
-# -----------------------------
 def pull_filing(cik, accno):
-    """
-    Given a company identifier (cik) and accession number (accno),
-    load the filing pickle and return the text from the relevant SEC item.
-    """
     dic = {"10-K": "item1a", "10-Q": "2item1a"}
     filing_path = os.path.join(parsedfolder, f"{cik}_{accno}.pkl")
     filing = pd.read_pickle(filing_path)
     text = filing["items"].get(dic.get(filing["formtype"]))
     return text
 
-# -----------------------------
-# Module 2: Sentence Tokenization
-# -----------------------------
 def split_into_sentences(text):
-    """
-    Tokenize the provided text into a list of sentences.
-    """
     if text:
         return nltk.sent_tokenize(text)
     return []
 
-# -----------------------------
-# Module 3: Sentence Categorization with difflib (Phase 1)
-# -----------------------------
 def categorize_sentence_changes(prev_sentences, curr_sentences, model, base_threshold=0.7, unchanged_threshold=0.95):
-    """
-    Categorize sentence changes between previous and current filings.
-    
-    First, use difflib.SequenceMatcher to identify blocks of exactly identical sentences.
-    Those sentences are immediately marked as "unchanged" and removed from further processing.
-    
-    For the remaining sentences, compute embeddings with the provided model and assign:
-      - "added": Sentences in current filing with max similarity < base_threshold.
-      - "altered": Sentences in current filing with max similarity in [base_threshold, unchanged_threshold).
-      - "unchanged": Also include sentences from difflib that were exact matches and those with similarity >= unchanged_threshold.
-      - "removed": Sentences in previous filing (after removing exact matches) with no similar sentence in current filing.
-    
-    Returns a dictionary with keys "added", "unchanged", "altered", "removed".
-    """
-    # Use difflib to find exactly matching blocks
     matcher = difflib.SequenceMatcher(None, prev_sentences, curr_sentences)
-    matching_blocks = matcher.get_matching_blocks()  # includes a dummy block at the end
+    matching_blocks = matcher.get_matching_blocks()
     exact_unchanged = set()
     for match in matching_blocks:
         if match.size > 0:
             for i in range(match.b, match.b + match.size):
                 exact_unchanged.add(curr_sentences[i])
     exact_unchanged = list(exact_unchanged)
-    
-    # Remove these exact matches from further processing
     filtered_curr = [s for s in curr_sentences if s not in exact_unchanged]
     filtered_prev = [s for s in prev_sentences if s not in exact_unchanged]
-    
-    # Initialize result dictionary with the exact matches already marked as "unchanged"
     categories = {"added": [], "unchanged": exact_unchanged.copy(), "altered": [], "removed": []}
-    
     if filtered_prev and filtered_curr:
         emb_prev = model.encode(filtered_prev)
         emb_curr = model.encode(filtered_curr)
         similarity_matrix = util.cos_sim(emb_curr, emb_prev).numpy()
-        
-        # Process current sentences from the filtered set
         for i, sims in enumerate(similarity_matrix):
             max_sim = np.max(sims)
             if max_sim < base_threshold:
@@ -90,8 +44,6 @@ def categorize_sentence_changes(prev_sentences, curr_sentences, model, base_thre
                     categories["unchanged"].append(filtered_curr[i])
                 else:
                     categories["altered"].append(filtered_curr[i])
-        
-        # Process previous sentences from the filtered set for removals
         col_maxes = np.max(similarity_matrix, axis=0)
         for j, sim in enumerate(col_maxes):
             if sim < base_threshold:
@@ -100,43 +52,28 @@ def categorize_sentence_changes(prev_sentences, curr_sentences, model, base_thre
         for s in prev_sentences:
             if s not in exact_unchanged:
                 categories["removed"].append(s)
-                
     return categories
 
 def process_filing_row(row, model):
-    """
-    Process a single row of the DataFrame.
-    Returns a tuple (cik, pair_key, category_dict) for the filing pair.
-    """
     cik = row["cik"]
     accno = row["accno"]
     prev_filing_accno = row["prev_filing_accno"]
     pair_key = f"{prev_filing_accno}_{accno}"
-    
     text_prev = pull_filing(cik, prev_filing_accno)
     text_curr = pull_filing(cik, accno)
     prev_sentences = split_into_sentences(text_prev)
     curr_sentences = split_into_sentences(text_curr)
-    
     if not prev_sentences or not curr_sentences:
         return None
-    
-    category_dict = categorize_sentence_changes(prev_sentences, curr_sentences,
-                                                model=model,
-                                                base_threshold=0.7,
-                                                unchanged_threshold=0.95)
+    category_dict = categorize_sentence_changes(prev_sentences, curr_sentences, model=model, base_threshold=0.7, unchanged_threshold=0.95)
     return (cik, pair_key, category_dict)
 
-def process_filings_categories_chunked(df, model, chunk_size=200, output_dir="."):
-    """
-    Process the DataFrame in chunks of chunk_size rows using parallel processing
-    (with threading backend) to generate a dictionary of categorized sentences.
-    After processing each chunk, save the partial result (including a timestamp)
-    to a pickle file so progress is preserved.
-    
-    Returns the combined dictionary of categorized sentences.
-    """
-    results = {}
+def process_filings_categories_chunked(df, model, chunk_size=200, output_dir=".", existing_pkl_file=None):
+    if existing_pkl_file is not None and os.path.exists(existing_pkl_file):
+        with open(existing_pkl_file, "rb") as f:
+            results = pickle.load(f)
+    else:
+        results = {}
     rows = df.to_dict(orient='records')
     total = len(rows)
     for i in range(0, total, chunk_size):
@@ -151,7 +88,6 @@ def process_filings_categories_chunked(df, model, chunk_size=200, output_dir="."
             if cik not in results:
                 results[cik] = {}
             results[cik][pair_key] = category_dict
-        # Save partial results with a timestamp
         timestamp = pd.Timestamp.today().strftime("%Y%m%d_%H%M%S")
         partial_filename = os.path.join(output_dir, f"filings_sentence_categories_{i}_{timestamp}.pkl")
         with open(partial_filename, "wb") as f:
@@ -159,28 +95,15 @@ def process_filings_categories_chunked(df, model, chunk_size=200, output_dir="."
         print(f"Chunk {i} processed and saved to {partial_filename}.")
     return results
 
-# -----------------------------
-# Module 4b: FinBERT Sentiment Analysis (Phase 2)
-# -----------------------------
 def analyze_sentiment(sentences, finbert_pipeline):
-    """
-    Analyze sentiment of a list of sentences using FinBERT.
-    Returns a dictionary mapping each sentence to its FinBERT sentiment output.
-    """
     if not sentences:
         return {}
     sentiments = finbert_pipeline(sentences)
     return {sentence: sentiment for sentence, sentiment in zip(sentences, sentiments)}
 
 def process_sentiments_without_gpt(categorized_dict, finbert_pipeline):
-    """
-    Process the categorized dictionary (from Phase 1) to compute FinBERT sentiment results.
-    For the "unchanged" category, assign a label "unchanged" to each sentence.
-    Returns a new dictionary where for each filing pair and for each category,
-    each sentence is mapped to its sentiment result.
-    """
     results = {}
-    for cik, filing_dict in categorized_dict.items():
+    for cik, filing_dict in tqdm(list(categorized_dict.items()), desc="Processing sentiments for filings"):
         results[cik] = {}
         for pair_key, categories in filing_dict.items():
             sentiment_results = {}
@@ -192,42 +115,19 @@ def process_sentiments_without_gpt(categorized_dict, finbert_pipeline):
             results[cik][pair_key] = sentiment_results
     return results
 
-# -----------------------------
-# Module 5: GPT-4 Turbo Correction (Phase 3)
-# -----------------------------
 def correct_sentiments_with_gpt(sentiment_dict):
-    """
-    For each sentence in sentiment_dict (mapping sentence to sentiment result),
-    call GPT-4 Turbo (via invoke_completions) to determine the correct sentiment.
-    Expects GPT-4 Turbo to return exactly one word: positive, negative, or neutral.
-    If correction is applied, backup the original label in "original_label" and overwrite "label".
-    Returns a new dictionary mapping each sentence to its corrected sentiment record.
-    """
     corrected = {}
     for sentence, sentiment in sentiment_dict.items():
         current_label = sentiment["label"]
-        prompt = (
-            f"Given the following sentence from a financial document:\n\n"
-            f"\"{sentence}\"\n\n"
-            "In a financial context, please determine the sentiment. "
-            "Respond with exactly one word—either positive, negative, or neutral—and nothing else."
-        )
+        prompt = f"Given the following sentence from a financial document:\n\n\"{sentence}\"\n\nIn a financial context, please determine the sentiment. Respond with exactly one word—either positive, negative, or neutral—and nothing else."
         gpt_response = invoke_completions(prompt)
         corrected_label = gpt_response.strip().lower()
         if corrected_label not in ["positive", "negative", "neutral"]:
             corrected_label = current_label
-        corrected[sentence] = {
-            "original_label": current_label,
-            "label": corrected_label,
-            "gpt_response": gpt_response.strip()
-        }
+        corrected[sentence] = {"original_label": current_label, "label": corrected_label, "gpt_response": gpt_response.strip()}
     return corrected
 
 def process_sentiments_correction(sentiments_dict):
-    """
-    Process the FinBERT sentiment results (from Phase 2) by applying GPT-4 Turbo correction.
-    Returns an updated dictionary with GPT-corrected sentiment results for each filing pair and category.
-    """
     corrected_results = {}
     for cik, filing_dict in sentiments_dict.items():
         corrected_results[cik] = {}
@@ -241,16 +141,7 @@ def process_sentiments_correction(sentiments_dict):
             corrected_results[cik][pair_key] = corrected_category
     return corrected_results
 
-# -----------------------------
-# Module 6: Aggregation (Phase 4)
-# -----------------------------
 def aggregate_sentiment_scores(sentiment_dict):
-    """
-    Given a dictionary of sentiment results per category,
-    aggregate a numeric score.
-    Mapping: positive -> +1, neutral -> 0, negative -> -1, unchanged -> 0.
-    Returns a dictionary with the aggregated average sentiment per category and list of scores.
-    """
     sentiment_mapping = {"positive": 1, "neutral": 0, "negative": -1, "unchanged": 0}
     aggregated = {}
     for category, sentence_sentiments in sentiment_dict.items():
@@ -264,11 +155,6 @@ def aggregate_sentiment_scores(sentiment_dict):
     return aggregated
 
 def aggregate_for_all_filings(sentiments_dict):
-    """
-    Given the updated sentiment dictionary for all filings (keyed by cik and filing pair),
-    aggregate sentiment scores for each filing pair.
-    Returns a nested dictionary with aggregated sentiment scores.
-    """
     aggregated_results = {}
     for cik, filing_dict in sentiments_dict.items():
         aggregated_results[cik] = {}
@@ -276,24 +162,9 @@ def aggregate_for_all_filings(sentiments_dict):
             aggregated_results[cik][pair_key] = aggregate_sentiment_scores(cat_scores)
     return aggregated_results
 
-# -----------------------------
-# Module 7: Weighting Strategy (Phase 5)
-# -----------------------------
 def compute_weighted_overall_sentiment(aggregated_results, weights=None):
-    """
-    Apply a weighting strategy to combine aggregated sentiment scores from different categories.
-    Default weighting example:
-      - "added": weight = 1.0 (new risks have full negative impact)
-      - "altered": weight = 0.5 (moderate change)
-      - "removed": weight = -1.0 (removal of negative risks is good news)
-      - "unchanged": weight = 0.0 (no impact)
-      
-    For each filing pair, compute the weighted overall sentiment.
-    Returns a nested dictionary keyed by cik and filing pair with the overall weighted sentiment.
-    """
     if weights is None:
         weights = {"added": 1.0, "altered": 0.5, "removed": -1.0, "unchanged": 0.0}
-    
     weighted_results = {}
     for cik, filing_dict in aggregated_results.items():
         weighted_results[cik] = {}
@@ -310,43 +181,23 @@ def compute_weighted_overall_sentiment(aggregated_results, weights=None):
             weighted_results[cik][pair_key] = overall_sentiment
     return weighted_results
 
-# -----------------------------
-# Main Execution: Run Phases Separately with Parallel Processing for Categorization
-# -----------------------------
 if __name__ == "__main__":
     os.chdir(pklpath)
-    # Load the DataFrame (ensure pklpath is set correctly)
     df = pd.read_pickle(pklpath + "f.pkl").reset_index(drop=True)
-    
-    # ----- Phase 1: Sentence Categorization with Chunking -----
-    categories_dict = process_filings_categories_chunked(df, model=mpnet, chunk_size=200, output_dir=pklpath)
+    categories_dict = process_filings_categories_chunked(df, model=mpnet, chunk_size=200, output_dir=pklpath, existing_pkl_file=None)
     with open("filings_sentence_categories.pkl", "wb") as f:
         pickle.dump(categories_dict, f)
     print("Phase 1 complete: Categorized sentences saved.")
-    
-    # ----- Phase 2: FinBERT Sentiment Analysis (Without GPT Correction) -----
     sentiments_dict = process_sentiments_without_gpt(categories_dict, finbert_pipeline=finbert)
     with open("filings_sentiment_finbert.pkl", "wb") as f:
         pickle.dump(sentiments_dict, f)
     print("Phase 2 complete: FinBERT sentiment analysis saved.")
-    
-    # ----- Phase 3: (Optional) GPT-4 Turbo Correction -----
     sentiments_corrected = process_sentiments_correction(sentiments_dict)
     with open("filings_sentiment_corrected.pkl", "wb") as f:
         pickle.dump(sentiments_corrected, f)
     print("Phase 3 complete: GPT-4 Turbo sentiment corrections saved.")
-    
-    # ----- Phase 4: Aggregation -----
     aggregated_results = aggregate_for_all_filings(sentiments_corrected)
-    with open("filings_sentiment_aggregated.json", "w") as f:
-        json.dump(aggregated_results, f, indent=2)
-    print("Phase 4 complete: Aggregated sentiment results saved.")
-    
-    # ----- Phase 5: Weighting Strategy -----
+    print("Phase 4 complete: Aggregated sentiment results computed.")
     weighted_overall = compute_weighted_overall_sentiment(aggregated_results)
-    with open("filings_weighted_overall.json", "w") as f:
-        json.dump(weighted_overall, f, indent=2)
-    print("Phase 5 complete: Weighted overall sentiment results saved.")
-    
-    # Optionally, print a sample of the weighted overall results
+    print("Phase 5 complete: Weighted overall sentiment results computed.")
     print(json.dumps(weighted_overall, indent=2))
